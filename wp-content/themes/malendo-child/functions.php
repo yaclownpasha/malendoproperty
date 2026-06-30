@@ -8,6 +8,14 @@ add_action('wp_enqueue_scripts', function () {
         [],
         wp_get_theme()->get('Version')
     );
+
+    wp_enqueue_script(
+        'malendo-lead-events',
+        get_stylesheet_directory_uri() . '/assets/js/lead-events.js',
+        [],
+        wp_get_theme()->get('Version'),
+        true
+    );
 }, 20);
 
 add_action('wp_head', function () {
