@@ -20,6 +20,32 @@
         window.dataLayer.push(Object.assign({ event: eventName }, payload));
     }
 
+    function leadTypeForEvent(eventName) {
+        var leadTypes = {
+            click_phone: 'phone',
+            click_email: 'email',
+            click_whatsapp: 'whatsapp',
+            click_telegram: 'telegram',
+            click_submit_application: 'submit_application',
+            form_submit_attempt: 'form'
+        };
+
+        return leadTypes[eventName] || '';
+    }
+
+    function sendGenerateLead(sourceEvent) {
+        var leadType = leadTypeForEvent(sourceEvent);
+
+        if (!leadType) {
+            return;
+        }
+
+        sendEvent('generate_lead', {
+            lead_type: leadType,
+            source_event: sourceEvent
+        });
+    }
+
     function cleanText(text) {
         return (text || '')
             .replace(/\s+/g, ' ')
@@ -134,6 +160,7 @@
         }
 
         sendEvent(classified.name, classified.params);
+        sendGenerateLead(classified.name);
     }, true);
 
     document.addEventListener('submit', function (event) {
@@ -148,5 +175,6 @@
             form_class: cleanText(form.className || ''),
             form_action_path: safeUrl(form.getAttribute('action') || '') ? safeUrl(form.getAttribute('action') || '').pathname : ''
         });
+        sendGenerateLead('form_submit_attempt');
     }, true);
 }());
