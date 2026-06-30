@@ -1,0 +1,95 @@
+name: Deploy child theme
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'wp-content/themes/malendo-child/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: malendo-production-deploy
+  cancel-in-progress: true
+
+jobs:
+  validate-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check PHP syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          find wp-content/themes/malendo-child \
+            -type f -name '*.php' -print0 \
+            | xargs -0 -r -n1 php -l
+
+      - name: Setup SSH key
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          echo "$SSH_PRIVATE_KEY" | base64 -d > "$HOME/.ssh/deploy_key"
+          chmod 600 "$HOME/.ssh/deploy_key"
+
+      - name: Add server to known hosts
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          set -euo pipefail
+          ssh-keyscan -p "${SSH_PORT:-22}" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Test SSH connection
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/deploy_key" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" "echo ok"
+
+      - name: Deploy child theme
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          WP_ROOT: ${{ secrets.WP_ROOT }}
+        run: |
+          set -euo pipefail
+          PORT="${SSH_PORT:-22}"
+          KEY="$HOME/.ssh/deploy_key"
+          TARGET="$SSH_USER@$SSH_HOST:$WP_ROOT/wp-content/themes/malendo-child"
+          ssh -i "$KEY" -p "$PORT" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" \
+            "mkdir -p '$WP_ROOT/wp-content/themes/malendo-child'"
+          scp -r -i "$KEY" -P "$PORT" -o BatchMode=yes \
+            wp-content/themes/malendo-child/* \
+            "$TARGET/"
+
+      - name: Flush WordPress cache
+        continue-on-error: true
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          WP_ROOT: ${{ secrets.WP_ROOT }}
+        run: |
+          ssh -i "$HOME/.ssh/deploy_key" -p "${SSH_PORT:-22}" -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" \
+            "cd '$WP_ROOT' && command -v wp >/dev/null && wp cache flush || true"

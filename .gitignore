@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.*
+!.env.example
+wp-config.php
+
+# Databases and backups
+*.sql
+*.sql.gz
+*.zip
+*.tar
+*.tar.gz
+backup/
+backups/
+db/
+
+# WordPress generated files
+wp-content/uploads/
+wp-content/cache/
+wp-content/upgrade/
+wp-content/ai1wm-backups/
+wp-content/updraft/
+
+# Dependencies and temporary files
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+
+# Local docx/temp extracts
+scripts/_docx_extract/
+scripts/_docx2_extract/
