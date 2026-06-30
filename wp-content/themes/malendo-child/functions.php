@@ -31,3 +31,25 @@ add_action('wp_head', function () {
     </script>
     <?php
 }, 1);
+
+add_filter('rest_endpoints', function ($endpoints) {
+    if (is_user_logged_in()) {
+        return $endpoints;
+    }
+
+    unset($endpoints['/wp/v2/users']);
+    unset($endpoints['/wp/v2/users/(?P<id>[\\d]+)']);
+
+    return $endpoints;
+});
+
+add_filter('wp_robots', function ($robots) {
+    if (is_author()) {
+        $robots['noindex'] = true;
+        $robots['follow'] = true;
+
+        unset($robots['index']);
+    }
+
+    return $robots;
+});
