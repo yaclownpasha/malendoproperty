@@ -53,3 +53,44 @@ add_filter('wp_robots', function ($robots) {
 
     return $robots;
 });
+
+add_action('template_redirect', function () {
+    if (
+        is_admin() ||
+        wp_doing_ajax() ||
+        is_feed() ||
+        (defined('REST_REQUEST') && REST_REQUEST) ||
+        (defined('WP_CLI') && WP_CLI) ||
+        (function_exists('wp_is_json_request') && wp_is_json_request())
+    ) {
+        return;
+    }
+
+    $request_method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : '';
+
+    if ($request_method === 'HEAD') {
+        return;
+    }
+
+    $accept = isset($_SERVER['HTTP_ACCEPT']) ? (string) $_SERVER['HTTP_ACCEPT'] : '';
+
+    if ($accept !== '' && stripos($accept, 'text/html') === false && stripos($accept, '*/*') === false) {
+        return;
+    }
+
+    ob_start(function ($html) {
+        if (!is_string($html) || $html === '') {
+            return $html;
+        }
+
+        // Temporary safety patch until the bad WP admin/MyHome menu URL is fixed at the source.
+        return str_replace(
+            [
+                'https://malendo.property/submit-your-application/',
+                'http://malendo.property/submit-your-application/',
+            ],
+            'https://malendo-property.com/submit-your-application/',
+            $html
+        );
+    });
+}, 0);
