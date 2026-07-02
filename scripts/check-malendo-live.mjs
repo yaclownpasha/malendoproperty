@@ -3,6 +3,7 @@
 const BASE_URL = 'https://malendo-property.com';
 const GA4_ID = 'G-D99Y7TY0LC';
 const FETCH_TIMEOUT_MS = 20000;
+const PRODUCT_SITEMAP_WARNING_THRESHOLD = 10;
 
 const outputMode = getOutputMode(process.argv.slice(2));
 
@@ -102,6 +103,15 @@ const restUserEndpoints = [
   '/wp-json/wp/v2/users/1',
 ];
 
+const demoTestPages = [
+  '/about-me-2/',
+  '/advanced-search-form/',
+  '/video-fullscreen-buttons/',
+  '/test/',
+  '/test-2/',
+  '/test-3/',
+];
+
 const checks = [];
 const pageCache = new Map();
 
@@ -171,6 +181,64 @@ function extractCanonical(html) {
     }
   }
   return '';
+}
+
+function extractLocs(xml) {
+  const locs = [];
+  const locMatches = xml.matchAll(/<loc>\s*([^<]+?)\s*<\/loc>/gi);
+  for (const match of locMatches) {
+    locs.push(match[1].trim());
+  }
+  return locs;
+}
+
+function extractMetaRobots(html) {
+  const metaMatches = html.match(/<meta\b[^>]*>/gi) ?? [];
+  for (const tag of metaMatches) {
+    if (!/\bname\s*=\s*['"]robots['"]/i.test(tag)) {
+      continue;
+    }
+    const contentMatch = tag.match(/\bcontent\s*=\s*['"]([^'"]+)['"]/i);
+    if (contentMatch) {
+      return contentMatch[1];
+    }
+  }
+  return '';
+}
+
+function categorizeSitemap(url) {
+  const normalizedUrl = url.toLowerCase();
+  const filename = normalizedUrl.split('/').pop() ?? normalizedUrl;
+
+  if (/product-sitemap\d*\.xml$/.test(filename)) {
+    return 'product';
+  }
+
+  if (/estate-sitemap\d*\.xml$/.test(filename)) {
+    return 'estate';
+  }
+
+  if (/page-sitemap\d*\.xml$/.test(filename)) {
+    return 'page';
+  }
+
+  if (/category-sitemap\d*\.xml$/.test(filename)) {
+    return 'category';
+  }
+
+  if (/(product[_-]?cat|product-category)-sitemap\d*\.xml$/.test(filename)) {
+    return 'productCategory';
+  }
+
+  if (/available-sitemap\d*\.xml$/.test(filename)) {
+    return 'available';
+  }
+
+  if (/(author|user)-sitemap\d*\.xml$/.test(filename)) {
+    return 'authorUser';
+  }
+
+  return 'other';
 }
 
 function looksLikePublicUserJson(status, text) {
@@ -370,6 +438,85 @@ async function checkLegacyBrandContactWarnings() {
   }
 }
 
+async function checkSitemapIndexationWarnings() {
+  const sitemapResult = await fetchUrl('/sitemap_index.xml', { accept: 'application/xml,text/xml,*/*;q=0.8' });
+  if (!sitemapResult.ok) {
+    addCheck('WARNING', 'SEO indexation sitemap', absoluteUrl('/sitemap_index.xml'), sitemapResult.error?.message ?? 'Fetch failed');
+    return;
+  }
+
+  if (sitemapResult.status !== 200) {
+    addCheck('WARNING', 'SEO indexation sitemap', sitemapResult.url, `Expected sitemap HTTP 200, got HTTP ${sitemapResult.status}`);
+    return;
+  }
+
+  const sitemapUrls = extractLocs(sitemapResult.text);
+  const counts = {
+    product: 0,
+    estate: 0,
+    page: 0,
+    category: 0,
+    productCategory: 0,
+    available: 0,
+    authorUser: 0,
+    other: 0,
+  };
+
+  for (const sitemapUrl of sitemapUrls) {
+    counts[categorizeSitemap(sitemapUrl)] += 1;
+  }
+
+  addCheck(
+    'PASS',
+    'SEO indexation sitemap summary',
+    sitemapResult.url,
+    `Sitemap counts: product=${counts.product}, estate=${counts.estate}, page=${counts.page}, category=${counts.category}, productCategory=${counts.productCategory}, available=${counts.available}, authorUser=${counts.authorUser}, other=${counts.other}`
+  );
+
+  if (counts.product >= PRODUCT_SITEMAP_WARNING_THRESHOLD) {
+    addCheck(
+      'WARNING',
+      'SEO indexation product sitemaps',
+      sitemapResult.url,
+      `Product sitemap count is still high: ${counts.product} product sitemap entries found`
+    );
+  }
+
+  if (counts.productCategory > 0) {
+    addCheck('WARNING', 'SEO indexation product category sitemap', sitemapResult.url, `Product category sitemap is still present: ${counts.productCategory} entry/entries`);
+  }
+
+  if (counts.available > 0) {
+    addCheck('WARNING', 'SEO indexation available sitemap', sitemapResult.url, `Available sitemap is still present: ${counts.available} entry/entries`);
+  }
+
+  if (counts.authorUser > 0) {
+    addCheck('WARNING', 'SEO indexation author/user sitemap', sitemapResult.url, `Author/user sitemap is still present: ${counts.authorUser} entry/entries`);
+  }
+
+  for (const path of demoTestPages) {
+    const result = await fetchUrl(path);
+    if (!result.ok) {
+      addCheck('WARNING', 'SEO indexation demo/test page', result.url, result.error?.message ?? 'Fetch failed');
+      continue;
+    }
+
+    if (result.status === 404 || result.status === 410) {
+      addCheck('PASS', 'SEO indexation demo/test page', result.url, `HTTP ${result.status}`);
+      continue;
+    }
+
+    const robots = extractMetaRobots(result.text).toLowerCase();
+    if (robots.includes('noindex')) {
+      addCheck('PASS', 'SEO indexation demo/test page', result.url, `HTTP ${result.status}, robots: ${robots}`);
+    } else if (result.status === 200) {
+      addCheck('WARNING', 'SEO indexation demo/test page', result.url, `Demo/test page appears indexable: HTTP 200, robots: ${robots || 'none'}`);
+    } else {
+      addCheck('WARNING', 'SEO indexation demo/test page', result.url, `Unexpected HTTP ${result.status}, robots: ${robots || 'none'}`);
+    }
+  }
+}
+
 function countByStatus() {
   return {
     pass: checks.filter((check) => check.status === 'PASS').length,
@@ -393,7 +540,10 @@ function overallStatus(counts) {
 function groupChecks() {
   const failures = checks.filter((check) => check.status === 'FAIL');
   const warnings = checks.filter((check) => check.status === 'WARNING');
+  const seoIndexationWarnings = warnings.filter((check) => check.label.startsWith('SEO indexation'));
+  const generalWarnings = warnings.filter((check) => !check.label.startsWith('SEO indexation'));
   const passes = checks.filter((check) => check.status === 'PASS');
+  const seoIndexationFindings = checks.filter((check) => check.label.startsWith('SEO indexation'));
 
   const criticalLabels = new Set([
     'Key page fetch',
@@ -432,7 +582,9 @@ function groupChecks() {
       check.label !== 'Estate canonical' &&
       check.label !== 'Chrome extension contamination'
     )),
-    warnings,
+    seoIndexationFindings,
+    seoIndexationWarnings,
+    warnings: generalWarnings,
     passedSafetyChecks: passes.filter((check) => passedSafetyLabels.has(check.label)),
   };
 }
@@ -465,6 +617,10 @@ function buildNextHumanActions(groups) {
     actions.push('Open the affected sell estates in WordPress and clear or correct Yoast canonical URL overrides so each canonical uses the clean pretty URL.');
   }
 
+  if (groups.seoIndexationWarnings.length > 0) {
+    actions.push('Review Yoast sitemap and indexation settings for product, product category, available, author/user, and demo/test pages.');
+  }
+
   if (groups.warnings.length > 0) {
     actions.push('Clean legacy Malendo.property, info@malendo.property, and http://malendo.property references in WP admin, Yoast, MyHome, user profiles, and content after confirming the correct values.');
   }
@@ -485,6 +641,7 @@ function buildRecommendedCodexAction(groups) {
     groups.wpAdminCleanupFailures.length > 0 ||
     groups.contentHygieneFailures.length > 0 ||
     groups.seoCanonicalFailures.length > 0 ||
+    groups.seoIndexationWarnings.length > 0 ||
     groups.warnings.length > 0
   ) {
     return 'No immediate Codex/Git change. Rerun this script after WP-admin cleanup, then remove the temporary Submit URL safety patch only after the real source is fixed and verified.';
@@ -521,6 +678,7 @@ function buildReport() {
     groups,
     summaries: {
       passedSafetyChecks: summarizeByLabel(groups.passedSafetyChecks),
+      seoIndexationWarnings: summarizeByLabel(groups.seoIndexationWarnings),
       warnings: summarizeByLabel(groups.warnings),
       failures: summarizeByLabel([
         ...groups.criticalFailures,
@@ -534,6 +692,7 @@ function buildReport() {
       'Fix the real Submit/Application URL source in WP admin, MyHome, menus, or database options before removing the temporary child-theme safety patch.',
       'Remove chrome-extension and hiro-wallet-provider snippets from affected estate descriptions or imported fields.',
       'Fix per-estate Yoast canonical URL overrides that point to ?post_type=estate&p= query URLs.',
+      'Reduce sitemap/indexation bloat in Yoast by reviewing products, product categories, available pages, author/user archives, and demo/test pages.',
       'Clean legacy Malendo.property, info@malendo.property, and http://malendo.property references after confirming official replacement values.',
     ],
     temporarySubmitUrlSafetyPatch: temporarySubmitPatchStatus(groups),
@@ -583,6 +742,9 @@ function printConsoleReport(report) {
 
   console.log('\nContent hygiene failures:');
   printItemList(report.groups.contentHygieneFailures);
+
+  console.log('\nSEO Indexation Warnings:');
+  printItemList(report.groups.seoIndexationWarnings);
 
   if (report.groups.otherFailures.length > 0) {
     console.log('\nOther failures:');
@@ -664,6 +826,10 @@ function printMarkdownReport(report) {
     '## Content Hygiene Failures',
     '',
     markdownItemList(report.groups.contentHygieneFailures),
+    '',
+    '## SEO Indexation Warnings',
+    '',
+    markdownItemList(report.groups.seoIndexationWarnings),
   ];
 
   if (report.groups.otherFailures.length > 0) {
@@ -756,6 +922,7 @@ async function main() {
   await checkSellPropertyLinks();
   await checkChromeExtensionContamination();
   await checkKnownEstateCanonicals();
+  await checkSitemapIndexationWarnings();
   await checkLegacyBrandContactWarnings();
 
   const report = buildReport();
