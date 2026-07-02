@@ -41,10 +41,63 @@ const badSubmitNeedles = [
   'drunkentiki.com',
 ];
 
-const legacyWarningNeedles = [
-  'Malendo.property',
+const contactBrandHygienePaths = [
+  '/',
+  '/contact/',
+  '/submit-your-application/',
+  '/rent-property/rent-villas/',
+  '/rent-property/rent-apartment/',
+  '/sell-property/sell-apartment/',
+  '/thailand/phuket/services/property-management/',
+];
+
+const highPriorityContactBrandPaths = new Set([
+  '/',
+  '/contact/',
+  '/submit-your-application/',
+]);
+
+const contactBrandHygieneChecks = [
+  {
+    needle: 'info@malendo.property',
+    action: 'Replace the legacy email in WP admin/content only after confirming the correct mailbox works.',
+    highPriorityFail: true,
+  },
+  {
+    needle: 'mailto:info@malendo.property',
+    action: 'Replace the legacy mailto link in WP admin/content only after confirming the correct mailbox works.',
+    highPriorityFail: true,
+  },
+  {
+    needle: 'http://malendo.property',
+    action: 'Replace old-domain links in WP admin/MyHome/Yoast unless they are verified official social profile URLs.',
+    highPriorityFail: false,
+  },
+  {
+    needle: 'https://malendo.property',
+    action: 'Replace old-domain links in WP admin/MyHome/Yoast unless they are verified official social profile URLs.',
+    highPriorityFail: false,
+  },
+  {
+    needle: 'Malendo.property',
+    action: 'Update legacy brand text to Malendo Property in WP admin, Yoast, MyHome settings, or page content.',
+    highPriorityFail: false,
+  },
+  {
+    needle: '2025 by Malendo',
+    action: 'Update old copyright text in WP admin, footer builder, theme options, or page content.',
+    highPriorityFail: false,
+  },
+  {
+    needle: '© 2025',
+    action: 'Update old copyright year/text in WP admin, footer builder, theme options, or page content.',
+    highPriorityFail: false,
+  },
+];
+
+const mixedContactEmails = [
   'info@malendo.property',
-  'http://malendo.property',
+  'info@malendo-property.com',
 ];
 
 const oldSellLinks = [
@@ -535,22 +588,35 @@ async function checkCanonicalOnly() {
   };
 }
 
-async function checkLegacyBrandContactWarnings() {
-  const warningPaths = Array.from(new Set([
-    ...keyPages,
-    ...chromeExtensionEstateUrls,
-    ...canonicalEstateUrls,
-  ]));
-
-  for (const path of warningPaths) {
+async function checkContactBrandHygiene() {
+  for (const path of contactBrandHygienePaths) {
     const result = await getPage(path);
     if (!result.ok || result.status !== 200) {
       continue;
     }
 
-    const matches = includesAny(result.text, legacyWarningNeedles);
-    if (matches.length > 0) {
-      addCheck('WARNING', 'Legacy brand/contact cleanup', result.url, `Found ${matches.join(', ')}`);
+    for (const hygieneCheck of contactBrandHygieneChecks) {
+      if (!result.text.includes(hygieneCheck.needle)) {
+        continue;
+      }
+
+      const status = hygieneCheck.highPriorityFail && highPriorityContactBrandPaths.has(path) ? 'FAIL' : 'WARNING';
+      addCheck(
+        status,
+        'Contact / Brand Hygiene',
+        result.url,
+        `Matched "${hygieneCheck.needle}". Recommended human action: ${hygieneCheck.action}`
+      );
+    }
+
+    const hasMixedEmails = mixedContactEmails.every((email) => result.text.includes(email));
+    if (hasMixedEmails) {
+      addCheck(
+        'WARNING',
+        'Contact / Brand Hygiene',
+        result.url,
+        'Matched both legacy and current email addresses. Recommended human action: standardize contact email in WP admin/content after confirming the correct mailbox works.'
+      );
     }
   }
 }
@@ -657,8 +723,12 @@ function overallStatus(counts) {
 function groupChecks() {
   const failures = checks.filter((check) => check.status === 'FAIL');
   const warnings = checks.filter((check) => check.status === 'WARNING');
+  const contactBrandHygiene = checks.filter((check) => check.label === 'Contact / Brand Hygiene');
   const seoIndexationWarnings = warnings.filter((check) => check.label.startsWith('SEO indexation'));
-  const generalWarnings = warnings.filter((check) => !check.label.startsWith('SEO indexation'));
+  const generalWarnings = warnings.filter((check) => (
+    !check.label.startsWith('SEO indexation') &&
+    check.label !== 'Contact / Brand Hygiene'
+  ));
   const passes = checks.filter((check) => check.status === 'PASS');
   const seoIndexationFindings = checks.filter((check) => check.label.startsWith('SEO indexation'));
 
@@ -693,11 +763,13 @@ function groupChecks() {
     wpAdminCleanupFailures: failures.filter((check) => wpAdminLabels.has(check.label)),
     seoCanonicalFailures: failures.filter((check) => check.label === 'Estate canonical'),
     contentHygieneFailures: failures.filter((check) => check.label === 'Chrome extension contamination'),
+    contactBrandHygiene,
     otherFailures: failures.filter((check) => (
       !criticalLabels.has(check.label) &&
       !wpAdminLabels.has(check.label) &&
       check.label !== 'Estate canonical' &&
-      check.label !== 'Chrome extension contamination'
+      check.label !== 'Chrome extension contamination' &&
+      check.label !== 'Contact / Brand Hygiene'
     )),
     seoIndexationFindings,
     seoIndexationWarnings,
@@ -734,6 +806,10 @@ function buildNextHumanActions(groups) {
     actions.push('Open the affected sell estates in WordPress and clear or correct Yoast canonical URL overrides so each canonical uses the clean pretty URL.');
   }
 
+  if (groups.contactBrandHygiene.length > 0) {
+    actions.push('Fix contact email, old-domain, brand, and copyright hygiene issues in WP admin, Yoast, MyHome settings, footer builder, or page content.');
+  }
+
   if (groups.seoIndexationWarnings.length > 0) {
     actions.push('Review Yoast sitemap and indexation settings for product, product category, available, author/user, and demo/test pages.');
   }
@@ -758,6 +834,7 @@ function buildRecommendedCodexAction(groups) {
     groups.wpAdminCleanupFailures.length > 0 ||
     groups.contentHygieneFailures.length > 0 ||
     groups.seoCanonicalFailures.length > 0 ||
+    groups.contactBrandHygiene.length > 0 ||
     groups.seoIndexationWarnings.length > 0 ||
     groups.warnings.length > 0
   ) {
@@ -796,12 +873,14 @@ function buildReport() {
     summaries: {
       passedSafetyChecks: summarizeByLabel(groups.passedSafetyChecks),
       seoIndexationWarnings: summarizeByLabel(groups.seoIndexationWarnings),
+      contactBrandHygiene: summarizeByLabel(groups.contactBrandHygiene),
       warnings: summarizeByLabel(groups.warnings),
       failures: summarizeByLabel([
         ...groups.criticalFailures,
         ...groups.wpAdminCleanupFailures,
         ...groups.seoCanonicalFailures,
         ...groups.contentHygieneFailures,
+        ...groups.contactBrandHygiene.filter((check) => check.status === 'FAIL'),
         ...groups.otherFailures,
       ]),
     },
@@ -810,7 +889,7 @@ function buildReport() {
       'Remove chrome-extension and hiro-wallet-provider snippets from affected estate descriptions or imported fields.',
       'Fix per-estate Yoast canonical URL overrides that point to ?post_type=estate&p= query URLs.',
       'Reduce sitemap/indexation bloat in Yoast by reviewing products, product categories, available pages, author/user archives, and demo/test pages.',
-      'Clean legacy Malendo.property, info@malendo.property, and http://malendo.property references after confirming official replacement values.',
+      'Clean legacy Malendo.property, info@malendo.property, old-domain links, mixed emails, and old copyright references after confirming official replacement values.',
     ],
     temporarySubmitUrlSafetyPatch: temporarySubmitPatchStatus(groups),
     nextHumanActions: buildNextHumanActions(groups),
@@ -859,6 +938,9 @@ function printConsoleReport(report) {
 
   console.log('\nContent hygiene failures:');
   printItemList(report.groups.contentHygieneFailures);
+
+  console.log('\nContact / Brand Hygiene:');
+  printItemList(report.groups.contactBrandHygiene);
 
   console.log('\nSEO Indexation Warnings:');
   printItemList(report.groups.seoIndexationWarnings);
@@ -943,6 +1025,10 @@ function printMarkdownReport(report) {
     '## Content Hygiene Failures',
     '',
     markdownItemList(report.groups.contentHygieneFailures),
+    '',
+    '## Contact / Brand Hygiene',
+    '',
+    markdownItemList(report.groups.contactBrandHygiene),
     '',
     '## SEO Indexation Warnings',
     '',
@@ -1079,6 +1165,9 @@ async function main() {
           wpAdminCleanupFailures: [],
           seoCanonicalFailures: [],
           contentHygieneFailures: [],
+          contactBrandHygiene: [],
+          seoIndexationFindings: [],
+          seoIndexationWarnings: [],
           otherFailures: [],
           warnings: [],
           passedSafetyChecks: [],
@@ -1111,7 +1200,7 @@ async function main() {
   await checkChromeExtensionContamination();
   await checkKnownEstateCanonicals();
   await checkSitemapIndexationWarnings();
-  await checkLegacyBrandContactWarnings();
+  await checkContactBrandHygiene();
 
   const report = buildReport();
   printReport(report);
@@ -1131,6 +1220,9 @@ main().catch((error) => {
         wpAdminCleanupFailures: [],
         seoCanonicalFailures: [],
         contentHygieneFailures: [],
+        contactBrandHygiene: [],
+        seoIndexationFindings: [],
+        seoIndexationWarnings: [],
         otherFailures: [],
         warnings: [],
         passedSafetyChecks: [],
