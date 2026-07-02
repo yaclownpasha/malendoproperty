@@ -52,6 +52,7 @@ The script groups output into:
 - WP-admin cleanup failures
 - SEO/canonical failures
 - Content hygiene failures
+- Contact / Brand Hygiene
 - SEO indexation warnings
 - Warnings
 - Passed safety checks
@@ -72,6 +73,7 @@ Run the script:
 - after fixing the remaining sell estate canonical URLs in Yoast, using `--canonical-only` for a faster check
 - after cleaning chrome-extension snippets from estate content
 - after changing Yoast/WooCommerce indexation settings
+- after cleaning legacy contact email, brand, and copyright text in WordPress admin/content
 
 ## What It Checks
 
@@ -93,7 +95,12 @@ The script checks:
 - product sitemap count is reported as a warning if it is still very high
 - product category, available, and author/user sitemaps are reported as warnings if still present
 - demo/test pages are reported as warnings if they still return HTTP `200` without `noindex`
-- legacy `Malendo.property`, `info@malendo.property`, and `http://malendo.property` strings are reported as warnings only
+- contact and brand hygiene on key commercial pages
+- legacy `info@malendo.property` and `mailto:info@malendo.property`
+- old-domain links to `http://malendo.property` or `https://malendo.property`
+- legacy `Malendo.property` brand text
+- old copyright text such as `2025 by Malendo` or `© 2025`
+- pages that contain both old and new email addresses
 
 ## SEO Indexation Checks
 
@@ -117,6 +124,26 @@ It also checks these known demo/test pages:
 - `/test-3/`
 
 These checks are warning-only because they are WordPress admin / Yoast cleanup tasks, not code failures.
+
+## Contact / Brand Hygiene Checks
+
+The script checks these key paths for legacy contact, brand, domain, and copyright strings:
+
+- `/`
+- `/contact/`
+- `/submit-your-application/`
+- `/rent-property/rent-villas/`
+- `/rent-property/rent-apartment/`
+- `/sell-property/sell-apartment/`
+- `/thailand/phuket/services/property-management/`
+
+The script reports:
+
+- `FAIL` if `info@malendo.property` or `mailto:info@malendo.property` appears on `/`, `/contact/`, or `/submit-your-application/`
+- `WARNING` if the legacy email appears on lower-priority pages
+- `WARNING` for old-domain links, legacy `Malendo.property` text, old copyright text, or mixed old/new email addresses
+
+These are WordPress admin, MyHome, Yoast, footer builder, or page-content cleanup tasks. Do not fix them by editing Git/theme files unless a future audit proves the source is actually in Git.
 
 ## Canonical-Only Mode
 
