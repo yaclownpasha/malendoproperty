@@ -35,12 +35,15 @@ function malendo_dequeue_woocommerce_assets_on_non_woo_pages() {
 
     $woocommerce_page_checks = [
         'is_woocommerce',
+        'is_shop',
         'is_cart',
         'is_checkout',
         'is_account_page',
         'is_product',
         'is_product_category',
         'is_product_tag',
+        'is_product_taxonomy',
+        'is_wc_endpoint_url',
     ];
 
     foreach ($woocommerce_page_checks as $woocommerce_page_check) {
