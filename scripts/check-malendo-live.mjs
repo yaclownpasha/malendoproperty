@@ -4,6 +4,8 @@ const BASE_URL = 'https://malendo-property.com';
 const GA4_ID = 'G-D99Y7TY0LC';
 const FETCH_TIMEOUT_MS = 20000;
 
+const outputMode = getOutputMode(process.argv.slice(2));
+
 const keyPages = [
   '/',
   '/contact/',
@@ -102,6 +104,18 @@ const restUserEndpoints = [
 
 const checks = [];
 const pageCache = new Map();
+
+function getOutputMode(args) {
+  if (args.includes('--json')) {
+    return 'json';
+  }
+
+  if (args.includes('--markdown')) {
+    return 'markdown';
+  }
+
+  return 'console';
+}
 
 function absoluteUrl(pathOrUrl) {
   return pathOrUrl.startsWith('http') ? pathOrUrl : `${BASE_URL}${pathOrUrl}`;
@@ -356,40 +370,384 @@ async function checkLegacyBrandContactWarnings() {
   }
 }
 
-function printSummary() {
-  const passCount = checks.filter((check) => check.status === 'PASS').length;
-  const warningCount = checks.filter((check) => check.status === 'WARNING').length;
-  const failCount = checks.filter((check) => check.status === 'FAIL').length;
-  const overall = failCount > 0 ? 'FAIL' : warningCount > 0 ? 'WARNING' : 'PASS';
+function countByStatus() {
+  return {
+    pass: checks.filter((check) => check.status === 'PASS').length,
+    warning: checks.filter((check) => check.status === 'WARNING').length,
+    fail: checks.filter((check) => check.status === 'FAIL').length,
+  };
+}
 
-  console.log(`\nMalendo live QA summary: ${overall}`);
-  console.log(`PASS: ${passCount}`);
-  console.log(`WARNING: ${warningCount}`);
-  console.log(`FAIL: ${failCount}`);
-
-  for (const status of ['FAIL', 'WARNING']) {
-    const items = checks.filter((check) => check.status === status);
-    if (items.length === 0) {
-      continue;
-    }
-
-    console.log(`\n${status} items:`);
-    for (const item of items) {
-      console.log(`- [${item.label}] ${item.url}`);
-      console.log(`  ${item.reason}`);
-    }
+function overallStatus(counts) {
+  if (counts.fail > 0) {
+    return 'FAIL';
   }
+
+  if (counts.warning > 0) {
+    return 'WARNING';
+  }
+
+  return 'PASS';
+}
+
+function groupChecks() {
+  const failures = checks.filter((check) => check.status === 'FAIL');
+  const warnings = checks.filter((check) => check.status === 'WARNING');
+  const passes = checks.filter((check) => check.status === 'PASS');
+
+  const criticalLabels = new Set([
+    'Key page fetch',
+    'Key page HTTP 200',
+    'Bad submit URL safety',
+    'GA4 tag present',
+    'lead-events.js present',
+    'REST users hardening',
+  ]);
+
+  const wpAdminLabels = new Set([
+    'Correct submit URL present',
+    'Old sell link cleanup',
+    'Replacement sell URL',
+  ]);
+
+  const passedSafetyLabels = new Set([
+    'Key page HTTP 200',
+    'Bad submit URL safety',
+    'Correct submit URL present',
+    'GA4 tag present',
+    'lead-events.js present',
+    'REST users hardening',
+    'Old sell link cleanup',
+    'Replacement sell URL',
+  ]);
+
+  return {
+    criticalFailures: failures.filter((check) => criticalLabels.has(check.label)),
+    wpAdminCleanupFailures: failures.filter((check) => wpAdminLabels.has(check.label)),
+    seoCanonicalFailures: failures.filter((check) => check.label === 'Estate canonical'),
+    contentHygieneFailures: failures.filter((check) => check.label === 'Chrome extension contamination'),
+    otherFailures: failures.filter((check) => (
+      !criticalLabels.has(check.label) &&
+      !wpAdminLabels.has(check.label) &&
+      check.label !== 'Estate canonical' &&
+      check.label !== 'Chrome extension contamination'
+    )),
+    warnings,
+    passedSafetyChecks: passes.filter((check) => passedSafetyLabels.has(check.label)),
+  };
+}
+
+function summarizeByLabel(items) {
+  const labelCounts = new Map();
+  for (const item of items) {
+    labelCounts.set(item.label, (labelCounts.get(item.label) ?? 0) + 1);
+  }
+
+  return Array.from(labelCounts.entries()).map(([label, count]) => ({ label, count }));
+}
+
+function buildNextHumanActions(groups) {
+  const actions = [];
+
+  if (groups.criticalFailures.length > 0) {
+    actions.push('Fix critical safety failures first, then rerun this script before any further deploy work.');
+  }
+
+  if (groups.wpAdminCleanupFailures.length > 0) {
+    actions.push('Fix broken or missing WP admin, MyHome, menu, or content URLs reported under WP-admin cleanup failures.');
+  }
+
+  if (groups.contentHygieneFailures.length > 0) {
+    actions.push('Open the affected estate pages in WordPress and remove chrome-extension and hiro-wallet-provider snippets from the estate content or imported fields.');
+  }
+
+  if (groups.seoCanonicalFailures.length > 0) {
+    actions.push('Open the affected sell estates in WordPress and clear or correct Yoast canonical URL overrides so each canonical uses the clean pretty URL.');
+  }
+
+  if (groups.warnings.length > 0) {
+    actions.push('Clean legacy Malendo.property, info@malendo.property, and http://malendo.property references in WP admin, Yoast, MyHome, user profiles, and content after confirming the correct values.');
+  }
+
+  if (actions.length === 0) {
+    actions.push('No human cleanup is currently required by this script.');
+  }
+
+  return actions;
+}
+
+function buildRecommendedCodexAction(groups) {
+  if (groups.criticalFailures.length > 0) {
+    return 'Review whether any critical failure came from Git or deploy configuration before opening another production PR.';
+  }
+
+  if (
+    groups.wpAdminCleanupFailures.length > 0 ||
+    groups.contentHygieneFailures.length > 0 ||
+    groups.seoCanonicalFailures.length > 0 ||
+    groups.warnings.length > 0
+  ) {
+    return 'No immediate Codex/Git change. Rerun this script after WP-admin cleanup, then remove the temporary Submit URL safety patch only after the real source is fixed and verified.';
+  }
+
+  return 'No Codex action needed.';
+}
+
+function temporarySubmitPatchStatus(groups) {
+  const badSubmitFailures = groups.criticalFailures.filter((check) => check.label === 'Bad submit URL safety');
+  if (badSubmitFailures.length > 0) {
+    return {
+      needed: true,
+      reason: 'Yes. Bad Submit/Application URL output is still reaching rendered HTML, so the safety patch is not enough or cache/source cleanup is incomplete.',
+    };
+  }
+
+  return {
+    needed: true,
+    reason: 'Yes. Keep it until the real WP admin/MyHome/menu source is fixed and verified. Passing rendered checks alone does not prove the source has been cleaned.',
+  };
+}
+
+function buildReport() {
+  const counts = countByStatus();
+  const overall = overallStatus(counts);
+  const groups = groupChecks();
+
+  return {
+    baseUrl: BASE_URL,
+    generatedAt: new Date().toISOString(),
+    overall,
+    counts,
+    groups,
+    summaries: {
+      passedSafetyChecks: summarizeByLabel(groups.passedSafetyChecks),
+      warnings: summarizeByLabel(groups.warnings),
+      failures: summarizeByLabel([
+        ...groups.criticalFailures,
+        ...groups.wpAdminCleanupFailures,
+        ...groups.seoCanonicalFailures,
+        ...groups.contentHygieneFailures,
+        ...groups.otherFailures,
+      ]),
+    },
+    knownWpAdminTasks: [
+      'Fix the real Submit/Application URL source in WP admin, MyHome, menus, or database options before removing the temporary child-theme safety patch.',
+      'Remove chrome-extension and hiro-wallet-provider snippets from affected estate descriptions or imported fields.',
+      'Fix per-estate Yoast canonical URL overrides that point to ?post_type=estate&p= query URLs.',
+      'Clean legacy Malendo.property, info@malendo.property, and http://malendo.property references after confirming official replacement values.',
+    ],
+    temporarySubmitUrlSafetyPatch: temporarySubmitPatchStatus(groups),
+    nextHumanActions: buildNextHumanActions(groups),
+    recommendedCodexAction: buildRecommendedCodexAction(groups),
+  };
+}
+
+function printItemList(items) {
+  if (items.length === 0) {
+    console.log('- None');
+    return;
+  }
+
+  for (const item of items) {
+    console.log(`- [${item.label}] ${item.url}`);
+    console.log(`  ${item.reason}`);
+  }
+}
+
+function printPassedSafetySummary(items) {
+  const summary = summarizeByLabel(items);
+  if (summary.length === 0) {
+    console.log('- None');
+    return;
+  }
+
+  for (const item of summary) {
+    console.log(`- ${item.label}: ${item.count} passed`);
+  }
+}
+
+function printConsoleReport(report) {
+  console.log(`\nMalendo live QA summary: ${report.overall}`);
+  console.log(`PASS: ${report.counts.pass}`);
+  console.log(`WARNING: ${report.counts.warning}`);
+  console.log(`FAIL: ${report.counts.fail}`);
+
+  console.log('\nCritical FAIL items:');
+  printItemList(report.groups.criticalFailures);
+
+  console.log('\nWP-admin cleanup failures:');
+  printItemList(report.groups.wpAdminCleanupFailures);
+
+  console.log('\nSEO/canonical failures:');
+  printItemList(report.groups.seoCanonicalFailures);
+
+  console.log('\nContent hygiene failures:');
+  printItemList(report.groups.contentHygieneFailures);
+
+  if (report.groups.otherFailures.length > 0) {
+    console.log('\nOther failures:');
+    printItemList(report.groups.otherFailures);
+  }
+
+  console.log('\nWarnings:');
+  printItemList(report.groups.warnings);
+
+  console.log('\nPassed safety checks:');
+  printPassedSafetySummary(report.groups.passedSafetyChecks);
+
+  console.log('\nKnown WP-admin tasks:');
+  for (const task of report.knownWpAdminTasks) {
+    console.log(`- ${task}`);
+  }
+
+  console.log('\nTemporary Submit URL safety patch:');
+  console.log(`- ${report.temporarySubmitUrlSafetyPatch.reason}`);
+
+  console.log('\nNext human actions:');
+  for (const action of report.nextHumanActions) {
+    console.log(`- ${action}`);
+  }
+
+  console.log('\nRecommended next Codex action:');
+  console.log(`- ${report.recommendedCodexAction}`);
+}
+
+function markdownItemList(items) {
+  if (items.length === 0) {
+    return '- None';
+  }
+
+  return items.map((item) => (
+    `- **${escapeMarkdown(item.label)}**: ${escapeMarkdown(item.url)}\n  - ${escapeMarkdown(item.reason)}`
+  )).join('\n');
+}
+
+function markdownSummaryList(items) {
+  const summary = summarizeByLabel(items);
+  if (summary.length === 0) {
+    return '- None';
+  }
+
+  return summary.map((item) => `- ${escapeMarkdown(item.label)}: ${item.count} passed`).join('\n');
+}
+
+function escapeMarkdown(value) {
+  return String(value).replace(/\|/g, '\\|');
+}
+
+function printMarkdownReport(report) {
+  const lines = [
+    '# Malendo Live QA Report',
+    '',
+    `Generated: ${report.generatedAt}`,
+    '',
+    `Overall status: **${report.overall}**`,
+    '',
+    '| Status | Count |',
+    '| --- | ---: |',
+    `| PASS | ${report.counts.pass} |`,
+    `| WARNING | ${report.counts.warning} |`,
+    `| FAIL | ${report.counts.fail} |`,
+    '',
+    '## Critical FAIL Items',
+    '',
+    markdownItemList(report.groups.criticalFailures),
+    '',
+    '## WP-admin Cleanup Failures',
+    '',
+    markdownItemList(report.groups.wpAdminCleanupFailures),
+    '',
+    '## SEO/Canonical Failures',
+    '',
+    markdownItemList(report.groups.seoCanonicalFailures),
+    '',
+    '## Content Hygiene Failures',
+    '',
+    markdownItemList(report.groups.contentHygieneFailures),
+  ];
+
+  if (report.groups.otherFailures.length > 0) {
+    lines.push('', '## Other Failures', '', markdownItemList(report.groups.otherFailures));
+  }
+
+  lines.push(
+    '',
+    '## Warnings',
+    '',
+    markdownItemList(report.groups.warnings),
+    '',
+    '## Passed Safety Checks',
+    '',
+    markdownSummaryList(report.groups.passedSafetyChecks),
+    '',
+    '## Known WP-admin Tasks',
+    '',
+    report.knownWpAdminTasks.map((task) => `- ${escapeMarkdown(task)}`).join('\n'),
+    '',
+    '## Temporary Submit URL Safety Patch',
+    '',
+    `- ${escapeMarkdown(report.temporarySubmitUrlSafetyPatch.reason)}`,
+    '',
+    '## Recommended Next Human Actions',
+    '',
+    report.nextHumanActions.map((action) => `- ${escapeMarkdown(action)}`).join('\n'),
+    '',
+    '## Recommended Next Codex Action',
+    '',
+    `- ${escapeMarkdown(report.recommendedCodexAction)}`,
+  );
+
+  console.log(lines.join('\n'));
+}
+
+function printJsonReport(report) {
+  console.log(JSON.stringify(report, null, 2));
+}
+
+function printReport(report) {
+  if (outputMode === 'json') {
+    printJsonReport(report);
+    return;
+  }
+
+  if (outputMode === 'markdown') {
+    printMarkdownReport(report);
+    return;
+  }
+
+  printConsoleReport(report);
 }
 
 async function main() {
   if (typeof fetch !== 'function') {
-    console.error('FAIL: This script requires a Node.js runtime with built-in fetch. Use Node.js 18 or newer.');
+    const message = 'FAIL: This script requires a Node.js runtime with built-in fetch. Use Node.js 18 or newer.';
+    if (outputMode === 'json') {
+      console.log(JSON.stringify({
+        baseUrl: BASE_URL,
+        generatedAt: new Date().toISOString(),
+        overall: 'FAIL',
+        counts: { pass: 0, warning: 0, fail: 1 },
+        groups: {
+          criticalFailures: [{ status: 'FAIL', label: 'Runtime', url: BASE_URL, reason: message }],
+          wpAdminCleanupFailures: [],
+          seoCanonicalFailures: [],
+          contentHygieneFailures: [],
+          otherFailures: [],
+          warnings: [],
+          passedSafetyChecks: [],
+        },
+      }, null, 2));
+    } else {
+      console.error(message);
+    }
     process.exitCode = 1;
     return;
   }
 
-  console.log(`Checking live site: ${BASE_URL}`);
-  console.log('This script is read-only and does not submit forms or change WordPress.');
+  if (outputMode === 'console') {
+    console.log(`Checking live site: ${BASE_URL}`);
+    console.log('This script is read-only and does not submit forms or change WordPress.');
+  }
 
   await checkKeyPages();
   await checkBadSubmitUrlSafety();
@@ -400,13 +758,32 @@ async function main() {
   await checkKnownEstateCanonicals();
   await checkLegacyBrandContactWarnings();
 
-  printSummary();
+  const report = buildReport();
+  printReport(report);
 
-  process.exitCode = checks.some((check) => check.status === 'FAIL') ? 1 : 0;
+  process.exitCode = report.counts.fail > 0 ? 1 : 0;
 }
 
 main().catch((error) => {
-  console.error('FAIL: Unhandled script error');
-  console.error(error);
+  if (outputMode === 'json') {
+    console.log(JSON.stringify({
+      baseUrl: BASE_URL,
+      generatedAt: new Date().toISOString(),
+      overall: 'FAIL',
+      counts: { pass: 0, warning: 0, fail: 1 },
+      groups: {
+        criticalFailures: [{ status: 'FAIL', label: 'Unhandled script error', url: BASE_URL, reason: error?.message ?? String(error) }],
+        wpAdminCleanupFailures: [],
+        seoCanonicalFailures: [],
+        contentHygieneFailures: [],
+        otherFailures: [],
+        warnings: [],
+        passedSafetyChecks: [],
+      },
+    }, null, 2));
+  } else {
+    console.error('FAIL: Unhandled script error');
+    console.error(error);
+  }
   process.exitCode = 1;
 });

@@ -12,9 +12,23 @@ From the repository root:
 
 ```bash
 node scripts/check-malendo-live.mjs
+node scripts/check-malendo-live.mjs --markdown
+node scripts/check-malendo-live.mjs --json
 ```
 
 Use Node.js 18 or newer so built-in `fetch` is available. The script does not require npm packages.
+
+## Output Formats
+
+- Default console output is grouped for a human operator.
+- `--markdown` prints a clean Markdown report that can be sent to a WordPress admin employee.
+- `--json` prints machine-readable JSON for automation or saving run history.
+
+All modes keep the same exit-code behavior:
+
+- exit `0` if there are no `FAIL` items
+- exit `1` if any `FAIL` item exists
+- warnings do not cause exit `1`
 
 ## What PASS / WARNING / FAIL Means
 
@@ -23,6 +37,21 @@ Use Node.js 18 or newer so built-in `fetch` is available. The script does not re
 - `FAIL`: a high-risk or regression check failed. The script exits with code `1` if any FAIL item exists.
 
 Warnings do not cause exit code `1`.
+
+## Report Sections
+
+The script groups output into:
+
+- Critical FAIL items
+- WP-admin cleanup failures
+- SEO/canonical failures
+- Content hygiene failures
+- Warnings
+- Passed safety checks
+- Known WP-admin tasks
+- Temporary Submit URL safety patch status
+- Recommended next human actions
+- Recommended next Codex action
 
 ## When To Run It
 
