@@ -74,7 +74,6 @@ function malendo_dequeue_woocommerce_assets_on_non_woo_pages() {
         'wc-add-to-cart',
         'wc-cart-fragments',
         'wc-add-to-cart-variation',
-        'js-cookie',
         'wc-js-cookie',
         'wc-jquery-blockui',
         'sourcebuster-js',
