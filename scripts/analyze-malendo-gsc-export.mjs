@@ -60,7 +60,8 @@ function parseArgs(argv) {
 function numberArg(parsed, key, fallback) {
   const value = Number(parsed.values.get(key));
   return Number.isFinite(value) ? value : fallback;
-}\n
+}
+
 function usage(exitCode = 1) {
   const text = [
     'Usage:',
