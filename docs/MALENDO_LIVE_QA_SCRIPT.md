@@ -1,0 +1,73 @@
+# Malendo Live QA Script
+
+## Purpose
+
+`scripts/check-malendo-live.mjs` is a local/manual validation script for checking important live-site health signals on `https://malendo-property.com`.
+
+It is intended for developers, Codex, or a technical operator to run after deploys or WordPress admin cleanup. The script is read-only: it fetches public URLs and checks rendered HTML, status codes, REST endpoint behavior, known bad links, tracking markers, content contamination markers, and known estate canonical issues.
+
+## How To Run
+
+From the repository root:
+
+```bash
+node scripts/check-malendo-live.mjs
+```
+
+Use Node.js 18 or newer so built-in `fetch` is available. The script does not require npm packages.
+
+## What PASS / WARNING / FAIL Means
+
+- `PASS`: the check matched the expected safe/live behavior.
+- `WARNING`: something known or non-blocking still needs cleanup, but it should not fail the run yet.
+- `FAIL`: a high-risk or regression check failed. The script exits with code `1` if any FAIL item exists.
+
+Warnings do not cause exit code `1`.
+
+## When To Run It
+
+Run the script:
+
+- after deploy
+- after WordPress admin cleanup
+- after clearing cache
+- before removing the temporary Submit URL safety patch
+- after fixing the 21 known estate canonical URLs
+- after cleaning chrome-extension snippets from estate content
+- after changing Yoast/WooCommerce indexation settings
+
+## What It Checks
+
+The script checks:
+
+- key commercial pages return HTTP `200`
+- bad Submit/Application URLs are not present
+- `drunkentiki.com` is not present
+- the corrected Submit/Application URL is present where expected
+- GA4 ID `G-D99Y7TY0LC` is present
+- `lead-events.js` is loaded
+- logged-out REST user endpoints do not expose public user JSON
+- old broken Sell Property links do not appear in sampled HTML or return `404`
+- replacement Sell Property links return HTTP `200`
+- known estate pages do not contain `chrome-extension://` or `hiro-wallet-provider`
+- known affected sell estate pages do not canonicalize to `?post_type=estate&p=...`
+- known affected sell estate pages do not canonicalize to `malendo.property`
+- legacy `Malendo.property`, `info@malendo.property`, and `http://malendo.property` strings are reported as warnings only
+
+## Important Notes
+
+- The script is read-only.
+- The script does not submit forms.
+- The script does not change WordPress.
+- The script does not change MyHome, Yoast, WooCommerce, Chaty, or CookieYes settings.
+- The script does not deploy anything.
+- The script does not require secrets.
+- Warnings for `info@malendo.property` and `Malendo.property` remain expected until WP-admin cleanup is complete.
+- A FAIL item should be investigated before merging more production changes.
+
+## Rollback
+
+This script does not affect production. To roll back the script itself, revert the commit or remove:
+
+- `scripts/check-malendo-live.mjs`
+- `docs/MALENDO_LIVE_QA_SCRIPT.md`
