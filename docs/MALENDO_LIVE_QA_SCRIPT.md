@@ -46,6 +46,7 @@ The script groups output into:
 - WP-admin cleanup failures
 - SEO/canonical failures
 - Content hygiene failures
+- SEO indexation warnings
 - Warnings
 - Passed safety checks
 - Known WP-admin tasks
@@ -81,7 +82,34 @@ The script checks:
 - known estate pages do not contain `chrome-extension://` or `hiro-wallet-provider`
 - known affected sell estate pages do not canonicalize to `?post_type=estate&p=...`
 - known affected sell estate pages do not canonicalize to `malendo.property`
+- sitemap index entries are counted by type where detectable
+- product sitemap count is reported as a warning if it is still very high
+- product category, available, and author/user sitemaps are reported as warnings if still present
+- demo/test pages are reported as warnings if they still return HTTP `200` without `noindex`
 - legacy `Malendo.property`, `info@malendo.property`, and `http://malendo.property` strings are reported as warnings only
+
+## SEO Indexation Checks
+
+The script fetches `https://malendo-property.com/sitemap_index.xml` and looks for:
+
+- product sitemaps
+- estate sitemaps
+- page sitemaps
+- category sitemaps
+- product category sitemaps
+- available sitemaps
+- author/user sitemaps
+
+It also checks these known demo/test pages:
+
+- `/about-me-2/`
+- `/advanced-search-form/`
+- `/video-fullscreen-buttons/`
+- `/test/`
+- `/test-2/`
+- `/test-3/`
+
+These checks are warning-only because they are WordPress admin / Yoast cleanup tasks, not code failures.
 
 ## Important Notes
 
