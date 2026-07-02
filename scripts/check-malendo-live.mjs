@@ -5,7 +5,9 @@ const GA4_ID = 'G-D99Y7TY0LC';
 const FETCH_TIMEOUT_MS = 20000;
 const PRODUCT_SITEMAP_WARNING_THRESHOLD = 10;
 
-const outputMode = getOutputMode(process.argv.slice(2));
+const cliArgs = process.argv.slice(2);
+const outputMode = getOutputMode(cliArgs);
+const canonicalOnly = cliArgs.includes('--canonical-only');
 
 const keyPages = [
   '/',
@@ -98,6 +100,28 @@ const canonicalEstateUrls = [
   '/properties/thailand/phuket/sell/bright-condo-bangtao/',
 ];
 
+const canonicalOnlyEstateUrls = [
+  '/properties/thailand/phuket/sell/kata-sea-view-villas/',
+  '/properties/thailand/phuket/sell/bluepoint-luxury-condominiums-5065/',
+  '/properties/thailand/phuket/sell/bluepoint-luxury-condominiums-5069/',
+  '/properties/thailand/phuket/sell/kamala-oceana-6/',
+  '/properties/thailand/phuket/sell/kamala-oceana-5/',
+  '/properties/thailand/phuket/sell/kamala-oceana-2/',
+  '/properties/thailand/phuket/sell/kamala-oceana-19/',
+  '/properties/thailand/phuket/sell/kamala-oceana-29/',
+  '/properties/thailand/phuket/sell/privilege/',
+  '/properties/thailand/phuket/sell/garden-properties-3/',
+  '/properties/thailand/phuket/sell/garden-properties-6/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10221/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10219/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10217/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10207/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10211/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10214/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao-10182/',
+  '/properties/thailand/phuket/sell/bright-condo-bangtao/',
+];
+
 const restUserEndpoints = [
   '/wp-json/wp/v2/users',
   '/wp-json/wp/v2/users/1',
@@ -129,6 +153,10 @@ function getOutputMode(args) {
 
 function absoluteUrl(pathOrUrl) {
   return pathOrUrl.startsWith('http') ? pathOrUrl : `${BASE_URL}${pathOrUrl}`;
+}
+
+function canonicalCompareValue(url) {
+  return url.replace(/\/+$/, '');
 }
 
 function addCheck(status, label, url, reason) {
@@ -416,6 +444,95 @@ async function checkKnownEstateCanonicals() {
       addCheck('PASS', 'Estate canonical', result.url, `Canonical OK: ${canonical}`);
     }
   }
+}
+
+async function checkCanonicalOnly() {
+  const items = [];
+
+  for (const path of canonicalOnlyEstateUrls) {
+    const url = absoluteUrl(path);
+    const result = await fetchUrl(url);
+    const expectedCanonical = absoluteUrl(path);
+
+    if (!result.ok) {
+      items.push({
+        status: 'FAIL',
+        url,
+        expectedCanonical,
+        canonical: '',
+        reason: result.error?.message ?? 'Fetch failed',
+      });
+      continue;
+    }
+
+    const canonical = extractCanonical(result.text);
+    if (!canonical) {
+      items.push({
+        status: 'FAIL',
+        url,
+        expectedCanonical,
+        canonical: '',
+        reason: 'No canonical tag found',
+      });
+      continue;
+    }
+
+    if (canonical.includes('?post_type=estate&p=')) {
+      items.push({
+        status: 'FAIL',
+        url,
+        expectedCanonical,
+        canonical,
+        reason: 'Canonical uses query URL',
+      });
+      continue;
+    }
+
+    if (canonical.includes('malendo.property')) {
+      items.push({
+        status: 'FAIL',
+        url,
+        expectedCanonical,
+        canonical,
+        reason: 'Canonical points to old domain',
+      });
+      continue;
+    }
+
+    if (canonicalCompareValue(canonical) !== canonicalCompareValue(expectedCanonical)) {
+      items.push({
+        status: 'FAIL',
+        url,
+        expectedCanonical,
+        canonical,
+        reason: 'Canonical does not match the clean pretty URL',
+      });
+      continue;
+    }
+
+    items.push({
+      status: 'PASS',
+      url,
+      expectedCanonical,
+      canonical,
+      reason: 'Canonical uses clean pretty URL',
+    });
+  }
+
+  const failed = items.filter((item) => item.status === 'FAIL');
+  const passed = items.filter((item) => item.status === 'PASS');
+
+  return {
+    baseUrl: BASE_URL,
+    generatedAt: new Date().toISOString(),
+    mode: 'canonical-only',
+    overall: failed.length > 0 ? 'FAIL' : 'PASS',
+    totalChecked: items.length,
+    passedCanonicals: passed.length,
+    failedCanonicals: failed.length,
+    items,
+    failed,
+  };
 }
 
 async function checkLegacyBrandContactWarnings() {
@@ -870,6 +987,70 @@ function printJsonReport(report) {
   console.log(JSON.stringify(report, null, 2));
 }
 
+function printCanonicalOnlyConsoleReport(report) {
+  console.log(`\nMalendo canonical-only QA summary: ${report.overall}`);
+  console.log(`Total checked: ${report.totalChecked}`);
+  console.log(`Passed canonicals: ${report.passedCanonicals}`);
+  console.log(`Failed canonicals: ${report.failedCanonicals}`);
+
+  console.log('\nRemaining failed URLs:');
+  if (report.failed.length === 0) {
+    console.log('- None');
+    return;
+  }
+
+  for (const item of report.failed) {
+    console.log(`- ${item.url}`);
+    console.log(`  Reason: ${item.reason}`);
+    console.log(`  Current canonical: ${item.canonical || 'none'}`);
+  }
+}
+
+function printCanonicalOnlyMarkdownReport(report) {
+  const lines = [
+    '# Malendo Canonical-Only QA Report',
+    '',
+    `Generated: ${report.generatedAt}`,
+    '',
+    `Overall status: **${report.overall}**`,
+    '',
+    '| Metric | Count |',
+    '| --- | ---: |',
+    `| Total checked | ${report.totalChecked} |`,
+    `| Passed canonicals | ${report.passedCanonicals} |`,
+    `| Failed canonicals | ${report.failedCanonicals} |`,
+    '',
+    '## Remaining Failed URLs',
+    '',
+  ];
+
+  if (report.failed.length === 0) {
+    lines.push('- None');
+  } else {
+    for (const item of report.failed) {
+      lines.push(`- **${escapeMarkdown(item.url)}**`);
+      lines.push(`  - Reason: ${escapeMarkdown(item.reason)}`);
+      lines.push(`  - Current canonical: ${escapeMarkdown(item.canonical || 'none')}`);
+    }
+  }
+
+  console.log(lines.join('\n'));
+}
+
+function printCanonicalOnlyReport(report) {
+  if (outputMode === 'json') {
+    printJsonReport(report);
+    return;
+  }
+
+  if (outputMode === 'markdown') {
+    printCanonicalOnlyMarkdownReport(report);
+    return;
+  }
+
+  printCanonicalOnlyConsoleReport(report);
+}
+
 function printReport(report) {
   if (outputMode === 'json') {
     printJsonReport(report);
@@ -913,6 +1094,13 @@ async function main() {
   if (outputMode === 'console') {
     console.log(`Checking live site: ${BASE_URL}`);
     console.log('This script is read-only and does not submit forms or change WordPress.');
+  }
+
+  if (canonicalOnly) {
+    const report = await checkCanonicalOnly();
+    printCanonicalOnlyReport(report);
+    process.exitCode = report.failedCanonicals > 0 ? 1 : 0;
+    return;
   }
 
   await checkKeyPages();

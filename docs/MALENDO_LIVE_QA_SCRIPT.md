@@ -14,6 +14,9 @@ From the repository root:
 node scripts/check-malendo-live.mjs
 node scripts/check-malendo-live.mjs --markdown
 node scripts/check-malendo-live.mjs --json
+node scripts/check-malendo-live.mjs --canonical-only
+node scripts/check-malendo-live.mjs --canonical-only --markdown
+node scripts/check-malendo-live.mjs --canonical-only --json
 ```
 
 Use Node.js 18 or newer so built-in `fetch` is available. The script does not require npm packages.
@@ -23,12 +26,15 @@ Use Node.js 18 or newer so built-in `fetch` is available. The script does not re
 - Default console output is grouped for a human operator.
 - `--markdown` prints a clean Markdown report that can be sent to a WordPress admin employee.
 - `--json` prints machine-readable JSON for automation or saving run history.
+- `--canonical-only` checks only the known affected sell estate canonical URLs.
 
 All modes keep the same exit-code behavior:
 
 - exit `0` if there are no `FAIL` items
 - exit `1` if any `FAIL` item exists
 - warnings do not cause exit `1`
+
+In `--canonical-only` mode, the script exits `0` only when all checked sell estate canonicals use clean pretty URLs. It exits `1` if any checked canonical still uses a query URL, points to the old domain, is missing, or does not match the clean pretty URL.
 
 ## What PASS / WARNING / FAIL Means
 
@@ -63,6 +69,7 @@ Run the script:
 - after clearing cache
 - before removing the temporary Submit URL safety patch
 - after fixing the 21 known estate canonical URLs
+- after fixing the remaining sell estate canonical URLs in Yoast, using `--canonical-only` for a faster check
 - after cleaning chrome-extension snippets from estate content
 - after changing Yoast/WooCommerce indexation settings
 
@@ -110,6 +117,31 @@ It also checks these known demo/test pages:
 - `/test-3/`
 
 These checks are warning-only because they are WordPress admin / Yoast cleanup tasks, not code failures.
+
+## Canonical-Only Mode
+
+Use canonical-only mode after a WordPress admin employee fixes the remaining sell estate Yoast canonical URLs:
+
+```bash
+node scripts/check-malendo-live.mjs --canonical-only
+node scripts/check-malendo-live.mjs --canonical-only --markdown
+node scripts/check-malendo-live.mjs --canonical-only --json
+```
+
+This mode is faster than full QA because it checks only the known affected sell estate URLs. It does not run full page checks, GA4 checks, REST checks, sitemap/indexation checks, Submit URL checks, or legacy brand/contact checks.
+
+The report includes:
+
+- total checked
+- passed canonicals
+- failed canonicals
+- remaining failed URLs
+- current canonical value for each failed URL
+
+Expected result after Yoast canonical cleanup:
+
+- `Failed canonicals: 0`
+- exit code `0`
 
 ## Important Notes
 
