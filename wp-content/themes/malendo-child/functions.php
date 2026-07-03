@@ -114,6 +114,10 @@ function malendo_dequeue_cf7_assets_on_non_form_pages() {
         return;
     }
 
+    if (function_exists('is_front_page') && is_front_page()) {
+        return;
+    }
+
     $request_path = isset($_SERVER['REQUEST_URI']) ? (string) wp_parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH) : '';
     $request_path = untrailingslashit($request_path);
 
