@@ -121,6 +121,10 @@ function malendo_dequeue_cf7_assets_on_non_form_pages() {
         return;
     }
 
+    if (function_exists('is_singular') && is_singular('estate')) {
+        return;
+    }
+
     $queried_object = function_exists('get_queried_object') ? get_queried_object() : null;
 
     if (!$queried_object instanceof WP_Post) {
