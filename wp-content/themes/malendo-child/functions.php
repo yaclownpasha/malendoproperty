@@ -92,6 +92,86 @@ function malendo_dequeue_woocommerce_assets_on_non_woo_pages() {
 }
 add_action('wp_enqueue_scripts', 'malendo_dequeue_woocommerce_assets_on_non_woo_pages', 99);
 
+function malendo_dequeue_cf7_assets_on_non_form_pages() {
+    if (
+        is_admin() ||
+        (function_exists('wp_doing_ajax') && wp_doing_ajax()) ||
+        (defined('REST_REQUEST') && REST_REQUEST) ||
+        (defined('WP_CLI') && WP_CLI) ||
+        (function_exists('wp_is_json_request') && wp_is_json_request()) ||
+        (function_exists('is_feed') && is_feed())
+    ) {
+        return;
+    }
+
+    $request_method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : '';
+
+    if ($request_method === 'HEAD') {
+        return;
+    }
+
+    if (function_exists('is_page') && is_page(['contact', 'submit-your-application'])) {
+        return;
+    }
+
+    if (function_exists('is_front_page') && is_front_page()) {
+        return;
+    }
+
+    $request_path = isset($_SERVER['REQUEST_URI']) ? (string) wp_parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH) : '';
+    $request_path = untrailingslashit($request_path);
+
+    if (in_array($request_path, ['/contact', '/submit-your-application'], true)) {
+        return;
+    }
+
+    if (function_exists('is_singular') && is_singular('estate')) {
+        return;
+    }
+
+    $queried_object = function_exists('get_queried_object') ? get_queried_object() : null;
+
+    if (!$queried_object instanceof WP_Post) {
+        return;
+    }
+
+    $post_content = (string) $queried_object->post_content;
+
+    if (
+        (function_exists('has_shortcode') && has_shortcode($post_content, 'contact-form-7')) ||
+        stripos($post_content, '[contact-form-7') !== false ||
+        stripos($post_content, 'wpcf7') !== false
+    ) {
+        return;
+    }
+
+    // Performance safety patch: remove this block to rollback. It only strips Contact Form 7 assets from pages with no detected CF7 form.
+    $cf7_style_handles = [
+        'contact-form-7',
+        'wpcf7',
+        'wpcf7-recaptcha',
+        'swv',
+    ];
+
+    $cf7_script_handles = [
+        'contact-form-7',
+        'wpcf7',
+        'wpcf7-recaptcha',
+        'swv',
+    ];
+
+    foreach ($cf7_style_handles as $cf7_style_handle) {
+        wp_dequeue_style($cf7_style_handle);
+        wp_deregister_style($cf7_style_handle);
+    }
+
+    foreach ($cf7_script_handles as $cf7_script_handle) {
+        wp_dequeue_script($cf7_script_handle);
+        wp_deregister_script($cf7_script_handle);
+    }
+}
+add_action('wp_enqueue_scripts', 'malendo_dequeue_cf7_assets_on_non_form_pages', 100);
+
 add_action('wp_head', function () {
     ?>
     <!-- Google tag (gtag.js) -->
