@@ -118,8 +118,11 @@ function malendo_dequeue_cf7_assets_on_non_form_pages() {
         return;
     }
 
-    $request_path = isset($_SERVER['REQUEST_URI']) ? (string) wp_parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH) : '';
-    $request_path = untrailingslashit($request_path);
+    $raw_request_path = isset($_SERVER['REQUEST_URI']) ? (string) wp_parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH) : '';
+    $request_path = untrailingslashit($raw_request_path);
+
+    // /properties/ was verified as a non-CF7 archive; keep this exception narrow so other uncertain archives stay protected.
+    $is_verified_non_cf7_archive = in_array($raw_request_path, ['/properties', '/properties/'], true);
 
     if (in_array($request_path, ['/contact', '/submit-your-application'], true)) {
         return;
@@ -129,20 +132,22 @@ function malendo_dequeue_cf7_assets_on_non_form_pages() {
         return;
     }
 
-    $queried_object = function_exists('get_queried_object') ? get_queried_object() : null;
+    if (!$is_verified_non_cf7_archive) {
+        $queried_object = function_exists('get_queried_object') ? get_queried_object() : null;
 
-    if (!$queried_object instanceof WP_Post) {
-        return;
-    }
+        if (!$queried_object instanceof WP_Post) {
+            return;
+        }
 
-    $post_content = (string) $queried_object->post_content;
+        $post_content = (string) $queried_object->post_content;
 
-    if (
-        (function_exists('has_shortcode') && has_shortcode($post_content, 'contact-form-7')) ||
-        stripos($post_content, '[contact-form-7') !== false ||
-        stripos($post_content, 'wpcf7') !== false
-    ) {
-        return;
+        if (
+            (function_exists('has_shortcode') && has_shortcode($post_content, 'contact-form-7')) ||
+            stripos($post_content, '[contact-form-7') !== false ||
+            stripos($post_content, 'wpcf7') !== false
+        ) {
+            return;
+        }
     }
 
     // Performance safety patch: remove this block to rollback. It only strips Contact Form 7 assets from pages with no detected CF7 form.
