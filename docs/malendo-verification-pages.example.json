@@ -1,0 +1,33 @@
+{
+  "pages": [
+    {
+      "pageName": "Example Phuket Project Review",
+      "url": "https://malendo-property.com/projects/example-phuket-project-review/",
+      "expectedTitle": "Example Phuket Project Review | Malendo Property",
+      "expectedH1": "Example Phuket Project Review",
+      "expectedRobots": "noindex,nofollow",
+      "expectedCanonical": "https://malendo-property.com/projects/example-phuket-project-review/",
+      "pageType": "project",
+      "requiredInternalLinks": [
+        "/developers/example-developer/",
+        "/properties/"
+      ],
+      "requiredCtaLinks": [
+        "/request-phuket-project-check/",
+        "/request-phuket-project-check/#current-availability",
+        "/request-phuket-project-check/#compare-projects",
+        "/request-phuket-project-check/#send-documents"
+      ],
+      "requiredSourceIds": [
+        "[S01]",
+        "[S02]"
+      ]
+    }
+  ],
+  "ordinaryPages": [
+    {
+      "pageName": "Contact page",
+      "url": "https://malendo-property.com/contact/"
+    }
+  ]
+}
