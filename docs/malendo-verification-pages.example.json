@@ -1,6 +1,44 @@
 {
   "pages": [
     {
+      "pageName": "Verification Methodology",
+      "url": "https://malendo-property.com/developers/phuket/methodology/",
+      "expectedTitle": "Phuket Developer Verification Methodology | Malendo Property",
+      "expectedH1": "Phuket Developer Verification Methodology",
+      "expectedRobots": "noindex,nofollow",
+      "expectedCanonical": "https://malendo-property.com/developers/phuket/methodology/",
+      "pageType": "methodology",
+      "requiresSources": false,
+      "requiredInternalLinks": [
+        "/developers/phuket/",
+        "/request-phuket-project-check/"
+      ],
+      "requiredCtaLinks": [
+        "/request-phuket-project-check/"
+      ],
+      "requiredSourceIds": []
+    },
+    {
+      "pageName": "Request a Phuket Project Check",
+      "url": "https://malendo-property.com/request-phuket-project-check/",
+      "expectedTitle": "Request a Phuket Project Check | Malendo Property",
+      "expectedH1": "Request a Phuket Project Check",
+      "expectedRobots": "noindex,nofollow",
+      "expectedCanonical": "https://malendo-property.com/request-phuket-project-check/",
+      "pageType": "request",
+      "requiresSources": false,
+      "requiredInternalLinks": [
+        "/developers/phuket/",
+        "/projects/"
+      ],
+      "requiredCtaLinks": [
+        "/request-phuket-project-check/#current-availability",
+        "/request-phuket-project-check/#compare-projects",
+        "/request-phuket-project-check/#send-documents"
+      ],
+      "requiredSourceIds": []
+    },
+    {
       "pageName": "Example Phuket Project Review",
       "url": "https://malendo-property.com/projects/example-phuket-project-review/",
       "expectedTitle": "Example Phuket Project Review | Malendo Property",
@@ -8,6 +46,7 @@
       "expectedRobots": "noindex,nofollow",
       "expectedCanonical": "https://malendo-property.com/projects/example-phuket-project-review/",
       "pageType": "project",
+      "requiresSources": true,
       "requiredInternalLinks": [
         "/developers/example-developer/",
         "/properties/"

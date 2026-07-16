@@ -57,6 +57,7 @@ The preferred root format has `pages` and optional `ordinaryPages` arrays:
       "expectedRobots": "noindex,nofollow",
       "expectedCanonical": "https://malendo-property.com/projects/example-phuket-project-review/",
       "pageType": "project",
+      "requiresSources": true,
       "requiredInternalLinks": [
         "/developers/example-developer/",
         "/properties/"
@@ -92,11 +93,26 @@ A root JSON array of Page entries is also accepted, but it cannot configure ordi
 | `expectedRobots` | Expected robots directives. Use `noindex,nofollow` before editorial approval. |
 | `expectedCanonical` | Expected canonical URL. |
 | `pageType` | Report grouping such as `developer` or `project`. |
+| `requiresSources` | Whether research-source evidence is mandatory. Defaults to `true`. |
 | `requiredInternalLinks` | Internal paths or absolute URLs that must render and be accessible. |
 | `requiredCtaLinks` | Approved CTA destinations that must render. |
 | `requiredSourceIds` | Source identifiers that must appear inline and in the source table. |
 
 `requiredInternalLinks`, `requiredCtaLinks`, and `requiredSourceIds` default to empty arrays. Configure them explicitly so the report can enforce the editorial brief.
+
+### Optional source requirements
+
+Research pages keep the default `"requiresSources": true`. Developer and project pages cannot opt out: they must include inline source IDs, a `.malendo-source-table`, HTTP(S) source links, and accessible source URLs.
+
+Methodology and Request a Project Check pages may set:
+
+```json
+"requiresSources": false
+```
+
+For those pages, the five source checks are reported as `SKIPPED` with the detail `Not required for this page type`. Every other metadata, H1, robots, canonical, component, CTA, internal-link, asset, domain, schema, and wording check still runs.
+
+A manifest is invalid when `requiresSources` is not a boolean, when a developer/project page sets it to `false`, or when `requiredSourceIds` contains values while `requiresSources` is `false`. This prevents an accidental opt-out from silently weakening a research brief.
 
 ### Ordinary Pages
 
@@ -132,9 +148,9 @@ For every verification Page, the script checks:
 6. Rendered last-checked date.
 7. Visible verification disclaimer.
 8. Rendered verification classifications.
-9. Required inline source IDs such as `[S06]`.
-10. Required source IDs represented in `.malendo-source-table`.
-11. Source-table HTTP(S) links and their accessibility.
+9. Required inline source IDs such as `[S06]` when `requiresSources` is true.
+10. Required source IDs represented in `.malendo-source-table` when sources are required.
+11. Source-table HTTP(S) links and their accessibility when sources are required.
 12. Verification CTA presence, approved destination, and accessibility.
 13. Required CTA and internal-link presence.
 14. Required internal-link accessibility.
@@ -168,6 +184,8 @@ This is not a content failure. Open the preview in an authenticated browser and 
 | `Indexing/status unsafe` | Robots, canonical, or disallowed schema failed. |
 | `Unverifiable without authenticated preview` | Public HTML was unavailable without authentication. |
 | `Keep Draft/noindex` | Only warnings remain and human review is still required. |
+
+Individual checks may report `SKIPPED` when source evidence is explicitly not required for that page type. A skipped source check does not change the page status or exit code.
 
 The primary status follows the highest-priority failed category. The per-check table remains the source of truth when several categories have problems.
 
