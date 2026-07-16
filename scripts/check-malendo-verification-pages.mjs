@@ -204,7 +204,7 @@ function checkSummary(checks) {
   return checks.reduce((summary, check) => {
     summary[check.severity] += 1;
     return summary;
-  }, { PASS: 0, WARNING: 0, FAIL: 0 });
+  }, { PASS: 0, SKIPPED: 0, WARNING: 0, FAIL: 0 });
 }
 
 async function fetchResource(url, options = {}) {
@@ -270,6 +270,21 @@ function validateManifestEntry(entry, index) {
     }
   }
 
+  if (entry.requiresSources !== undefined && typeof entry.requiresSources !== 'boolean') {
+    throw new Error(`pages[${index}].requiresSources must be true or false`);
+  }
+
+  const pageType = normalizeSpace(entry.pageType) || 'verification';
+  const requiresSources = entry.requiresSources ?? true;
+  const requiredSourceIds = entry.requiredSourceIds || [];
+
+  if (!requiresSources && requiredSourceIds.length) {
+    throw new Error(`pages[${index}] cannot set requiredSourceIds when requiresSources is false`);
+  }
+  if (!requiresSources && ['developer', 'project'].includes(pageType.toLowerCase())) {
+    throw new Error(`pages[${index}].requiresSources cannot be false for ${pageType} pages`);
+  }
+
   return {
     pageName: normalizeSpace(entry.pageName),
     url: entry.url,
@@ -277,10 +292,11 @@ function validateManifestEntry(entry, index) {
     expectedH1: normalizeSpace(entry.expectedH1),
     expectedRobots: normalizeSpace(entry.expectedRobots),
     expectedCanonical: entry.expectedCanonical || '',
-    pageType: normalizeSpace(entry.pageType) || 'verification',
+    pageType,
+    requiresSources,
     requiredInternalLinks: entry.requiredInternalLinks || [],
     requiredCtaLinks: entry.requiredCtaLinks || [],
-    requiredSourceIds: entry.requiredSourceIds || [],
+    requiredSourceIds,
   };
 }
 
@@ -398,6 +414,7 @@ async function auditPage(entry) {
   const result = {
     pageName: entry.pageName,
     pageType: entry.pageType,
+    requiresSources: entry.requiresSources,
     url: redactUrl(entry.url),
     finalUrl: '',
     httpStatus: 0,
@@ -506,30 +523,40 @@ async function auditPage(entry) {
   result.sourceIds = [...new Set([...text.matchAll(/\[S\d{2,}\]/gi)].map((match) => match[0].toUpperCase()))];
   const requiredSourceIds = entry.requiredSourceIds.map((id) => String(id).toUpperCase());
   const missingSourceIds = requiredSourceIds.filter((id) => !result.sourceIds.includes(id));
-  if (missingSourceIds.length) {
-    addCheck(result, 'FAIL', 'source', 'Required inline source IDs', `Missing: ${missingSourceIds.join(', ')}`);
-  } else if (result.sourceIds.length) {
-    addCheck(result, 'PASS', 'source', 'Inline source IDs', result.sourceIds.join(', '));
-  } else {
-    addCheck(result, 'FAIL', 'source', 'Inline source IDs', 'No [S00] source IDs found');
-  }
-
   const sourceTables = extractSourceTables(html);
   const sourceTableText = sourceTables.map((table) => table.text).join(' ').toUpperCase();
   const sourceAnchors = sourceTables.flatMap((table) => extractAnchors(table.html));
   const sourceUrls = [...new Set(sourceAnchors.map((anchor) => safeUrl(anchor.href, response.finalUrl)?.href).filter(Boolean))];
   result.sourceLinks = sourceUrls.map(redactUrl);
-  addCheck(result, sourceTables.length ? 'PASS' : 'FAIL', 'source', 'Source table', sourceTables.length ? `${sourceTables.length} table(s)` : 'Missing .malendo-source-table');
-  addCheck(result, sourceUrls.length ? 'PASS' : 'FAIL', 'source', 'Source-table links', sourceUrls.length ? `${sourceUrls.length} HTTP(S) link(s)` : 'No HTTP(S) source links found');
-  const sourceIdsMissingFromTable = requiredSourceIds.filter((id) => !sourceTableText.includes(id));
-  addCheck(result, sourceIdsMissingFromTable.length ? 'FAIL' : 'PASS', 'source', 'Source IDs represented in source table', sourceIdsMissingFromTable.length ? `Missing from source table: ${sourceIdsMissingFromTable.join(', ')}` : `${requiredSourceIds.length} required source ID(s) represented`);
 
-  for (const sourceUrl of sourceUrls) {
-    const sourceResponse = await checkLinkedResource(sourceUrl);
-    const severity = sourceResponse.ok && sourceResponse.status >= 200 && sourceResponse.status < 400
-      ? 'PASS'
-      : (sourceResponse.ok && [401, 403, 429].includes(sourceResponse.status) ? 'WARNING' : 'FAIL');
-    addCheck(result, severity, 'source', 'Source URL accessibility', `${redactUrl(sourceUrl)} -> ${sourceResponse.status || sourceResponse.error}`);
+  if (!entry.requiresSources) {
+    for (const label of ['Inline source IDs', 'Source table', 'Source-table links', 'Source IDs represented in source table', 'Source URL accessibility']) {
+      addCheck(result, 'SKIPPED', 'source', label, 'Not required for this page type');
+    }
+  } else {
+    if (missingSourceIds.length) {
+      addCheck(result, 'FAIL', 'source', 'Required inline source IDs', `Missing: ${missingSourceIds.join(', ')}`);
+    } else if (result.sourceIds.length) {
+      addCheck(result, 'PASS', 'source', 'Inline source IDs', result.sourceIds.join(', '));
+    } else {
+      addCheck(result, 'FAIL', 'source', 'Inline source IDs', 'No [S00] source IDs found');
+    }
+
+    addCheck(result, sourceTables.length ? 'PASS' : 'FAIL', 'source', 'Source table', sourceTables.length ? `${sourceTables.length} table(s)` : 'Missing .malendo-source-table');
+    addCheck(result, sourceUrls.length ? 'PASS' : 'FAIL', 'source', 'Source-table links', sourceUrls.length ? `${sourceUrls.length} HTTP(S) link(s)` : 'No HTTP(S) source links found');
+    const sourceIdsMissingFromTable = requiredSourceIds.filter((id) => !sourceTableText.includes(id));
+    addCheck(result, sourceIdsMissingFromTable.length ? 'FAIL' : 'PASS', 'source', 'Source IDs represented in source table', sourceIdsMissingFromTable.length ? `Missing from source table: ${sourceIdsMissingFromTable.join(', ')}` : `${requiredSourceIds.length} required source ID(s) represented`);
+
+    if (!sourceUrls.length) {
+      addCheck(result, 'FAIL', 'source', 'Source URL accessibility', 'No source URLs to check');
+    }
+    for (const sourceUrl of sourceUrls) {
+      const sourceResponse = await checkLinkedResource(sourceUrl);
+      const severity = sourceResponse.ok && sourceResponse.status >= 200 && sourceResponse.status < 400
+        ? 'PASS'
+        : (sourceResponse.ok && [401, 403, 429].includes(sourceResponse.status) ? 'WARNING' : 'FAIL');
+      addCheck(result, severity, 'source', 'Source URL accessibility', `${redactUrl(sourceUrl)} -> ${sourceResponse.status || sourceResponse.error}`);
+    }
   }
 
   const ctaAnchors = extractCtaAnchors(anchors);
@@ -652,9 +679,9 @@ function renderMarkdown(report) {
     '',
     `Generated: ${report.generatedAt}`,
     '',
-    '| PASS | WARNING | FAIL |',
-    '| ---: | ---: | ---: |',
-    `| ${report.summary.PASS} | ${report.summary.WARNING} | ${report.summary.FAIL} |`,
+    '| PASS | SKIPPED | WARNING | FAIL |',
+    '| ---: | ---: | ---: | ---: |',
+    `| ${report.summary.PASS} | ${report.summary.SKIPPED} | ${report.summary.WARNING} | ${report.summary.FAIL} |`,
     '',
     '## Page Status',
     '',
@@ -664,7 +691,7 @@ function renderMarkdown(report) {
   ];
 
   for (const page of report.pages) {
-    lines.push('', `## ${page.pageName}`, '', `- URL: ${page.url}`, `- Final URL: ${page.finalUrl || 'Unverified'}`, `- Status: **${page.status}**`);
+    lines.push('', `## ${page.pageName}`, '', `- URL: ${page.url}`, `- Final URL: ${page.finalUrl || 'Unverified'}`, `- Status: **${page.status}**`, `- Sources required: ${page.requiresSources ? 'Yes' : 'No'}`);
     if (page.metadata.title !== undefined) {
       lines.push(`- Title: ${page.metadata.title || 'Missing'}`, `- H1: ${page.metadata.h1Texts?.join(' | ') || 'Missing'}`, `- Robots: ${page.metadata.robots || 'Missing'}`, `- Canonical: ${page.metadata.canonical || 'Missing'}`);
     }
@@ -698,7 +725,7 @@ function renderMarkdown(report) {
 function renderConsole(report) {
   const lines = [
     'Malendo Verification Page QA',
-    `PASS ${report.summary.PASS} | WARNING ${report.summary.WARNING} | FAIL ${report.summary.FAIL}`,
+    `PASS ${report.summary.PASS} | SKIPPED ${report.summary.SKIPPED} | WARNING ${report.summary.WARNING} | FAIL ${report.summary.FAIL}`,
     '',
   ];
 
