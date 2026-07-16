@@ -253,3 +253,251 @@ add_action('template_redirect', function () {
         );
     });
 }, 0);
+
+function malendo_verification_content_shortcode_tags() {
+    return [
+        'malendo_verification_box',
+        'malendo_last_checked',
+        'malendo_verification_disclaimer',
+        'malendo_verification_cta',
+        'malendo_verification_toc',
+    ];
+}
+
+function malendo_page_has_verification_content_shortcode() {
+    if (!function_exists('is_singular') || !is_singular('page')) {
+        return false;
+    }
+
+    $page = get_queried_object();
+
+    if (!$page instanceof WP_Post) {
+        return false;
+    }
+
+    $content = (string) $page->post_content;
+
+    foreach (malendo_verification_content_shortcode_tags() as $shortcode_tag) {
+        if (has_shortcode($content, $shortcode_tag)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function malendo_enqueue_verification_content_assets() {
+    if (
+        is_admin() ||
+        (function_exists('wp_doing_ajax') && wp_doing_ajax()) ||
+        (defined('REST_REQUEST') && REST_REQUEST) ||
+        (defined('WP_CLI') && WP_CLI) ||
+        (function_exists('wp_is_json_request') && wp_is_json_request()) ||
+        !malendo_page_has_verification_content_shortcode()
+    ) {
+        return;
+    }
+
+    $theme_version = wp_get_theme()->get('Version');
+
+    wp_enqueue_style(
+        'malendo-verification-content',
+        get_stylesheet_directory_uri() . '/assets/css/verification-content.css',
+        [],
+        $theme_version
+    );
+
+    wp_enqueue_script(
+        'malendo-verification-content',
+        get_stylesheet_directory_uri() . '/assets/js/verification-content.js',
+        [],
+        $theme_version,
+        true
+    );
+}
+add_action('wp_enqueue_scripts', 'malendo_enqueue_verification_content_assets', 30);
+
+function malendo_verification_box_shortcode($attributes, $content = '') {
+    $types = [
+        'verified' => 'Verified',
+        'developer-claim' => 'Developer claim',
+        'public-report' => 'Public report',
+        'inconsistency' => 'Inconsistency to check',
+        'unknown' => 'Unknown',
+        'buyer-question' => 'Buyer question',
+    ];
+    $attributes = shortcode_atts(
+        [
+            'type' => 'unknown',
+            'title' => '',
+        ],
+        $attributes,
+        'malendo_verification_box'
+    );
+    $type = sanitize_key((string) $attributes['type']);
+
+    if (!isset($types[$type])) {
+        $type = 'unknown';
+    }
+
+    $title = trim(wp_strip_all_tags((string) $attributes['title']));
+
+    if ($title === '') {
+        $title = $types[$type];
+    }
+
+    $body = wp_kses_post(do_shortcode(wpautop((string) $content)));
+    $accessible_label = sprintf('%s: %s', $types[$type], $title);
+
+    return sprintf(
+        '<section class="malendo-verification-box malendo-verification-box--%1$s" role="note" aria-label="%2$s"><p class="malendo-verification-box__status">%3$s</p><p class="malendo-verification-box__title">%4$s</p><div class="malendo-verification-box__content">%5$s</div></section>',
+        esc_attr($type),
+        esc_attr($accessible_label),
+        esc_html($types[$type]),
+        esc_html($title),
+        $body
+    );
+}
+
+function malendo_last_checked_shortcode($attributes) {
+    $attributes = shortcode_atts(
+        [
+            'date' => '',
+        ],
+        $attributes,
+        'malendo_last_checked'
+    );
+    $date_value = trim((string) $attributes['date']);
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $date_value);
+    $date_errors = DateTimeImmutable::getLastErrors();
+
+    if (
+        !$date ||
+        ($date_errors !== false && ($date_errors['warning_count'] > 0 || $date_errors['error_count'] > 0)) ||
+        $date->format('Y-m-d') !== $date_value
+    ) {
+        return '';
+    }
+
+    return sprintf(
+        '<p class="malendo-last-checked"><span class="malendo-last-checked__label">%1$s</span> <time datetime="%2$s">%3$s</time></p>',
+        esc_html__('Last checked:', 'malendo-child'),
+        esc_attr($date_value),
+        esc_html($date->format('j F Y'))
+    );
+}
+
+function malendo_verification_disclaimer_shortcode($attributes) {
+    $default_text = 'Public-source research only. This page is not legal, tax, financial or investment advice. Buyers should verify documents with qualified Thai legal and professional advisers.';
+    $attributes = shortcode_atts(
+        [
+            'text' => $default_text,
+        ],
+        $attributes,
+        'malendo_verification_disclaimer'
+    );
+    $text = trim(sanitize_text_field((string) $attributes['text']));
+
+    if ($text === '') {
+        $text = $default_text;
+    }
+
+    return sprintf(
+        '<aside class="malendo-verification-disclaimer" role="note" aria-label="%1$s"><p>%2$s</p></aside>',
+        esc_attr__('Verification disclaimer', 'malendo-child'),
+        esc_html($text)
+    );
+}
+
+function malendo_verification_internal_url($url) {
+    $url = trim((string) $url);
+
+    if ($url === '') {
+        return '';
+    }
+
+    if (strpos($url, '/') === 0 && strpos($url, '//') !== 0) {
+        $url = home_url($url);
+    } else {
+        $url = esc_url_raw($url, ['http', 'https']);
+    }
+
+    if ($url === '') {
+        return '';
+    }
+
+    $url = wp_validate_redirect($url, '');
+
+    if ($url === '') {
+        return '';
+    }
+
+    $home_host = strtolower((string) wp_parse_url(home_url('/'), PHP_URL_HOST));
+    $url_host = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+
+    if ($url_host === '' || $url_host !== $home_host) {
+        return '';
+    }
+
+    return $url;
+}
+
+function malendo_verification_cta_shortcode($attributes) {
+    $types = [
+        'project-check' => 'Request a Project Check',
+        'developer-check' => 'Request a Developer Check',
+        'current-availability' => 'Check Current Availability',
+        'send-documents' => 'Send Project Documents',
+        'compare-projects' => 'Compare Projects',
+    ];
+    $attributes = shortcode_atts(
+        [
+            'type' => '',
+            'url' => '',
+            'label' => '',
+        ],
+        $attributes,
+        'malendo_verification_cta'
+    );
+    $type = sanitize_key((string) $attributes['type']);
+
+    if (!isset($types[$type])) {
+        return '';
+    }
+
+    $url = malendo_verification_internal_url($attributes['url']);
+
+    if ($url === '') {
+        return '';
+    }
+
+    $label = trim(wp_strip_all_tags((string) $attributes['label']));
+
+    if ($label === '') {
+        $label = $types[$type];
+    }
+
+    return sprintf(
+        '<div class="malendo-verification-cta-wrap"><a class="malendo-verification-cta malendo-verification-cta--%1$s" href="%2$s" data-malendo-verification-cta="%1$s">%3$s</a></div>',
+        esc_attr($type),
+        esc_url($url),
+        esc_html($label)
+    );
+}
+
+function malendo_verification_toc_shortcode() {
+    return sprintf(
+        '<nav class="malendo-verification-toc" data-malendo-verification-toc aria-label="%1$s" hidden><p class="malendo-verification-toc__title">%2$s</p><ol class="malendo-verification-toc__list" data-malendo-verification-toc-list></ol></nav>',
+        esc_attr__('Table of contents', 'malendo-child'),
+        esc_html__('On this page', 'malendo-child')
+    );
+}
+
+function malendo_register_verification_content_shortcodes() {
+    add_shortcode('malendo_verification_box', 'malendo_verification_box_shortcode');
+    add_shortcode('malendo_last_checked', 'malendo_last_checked_shortcode');
+    add_shortcode('malendo_verification_disclaimer', 'malendo_verification_disclaimer_shortcode');
+    add_shortcode('malendo_verification_cta', 'malendo_verification_cta_shortcode');
+    add_shortcode('malendo_verification_toc', 'malendo_verification_toc_shortcode');
+}
+add_action('init', 'malendo_register_verification_content_shortcodes');
