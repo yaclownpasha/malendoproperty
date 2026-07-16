@@ -1,0 +1,227 @@
+.malendo-verification-content {
+    --malendo-verification-border: #d7dce2;
+    --malendo-verification-text: #24282d;
+    --malendo-verification-muted: #5d6570;
+    --malendo-verification-surface: #f7f8f9;
+    --malendo-verification-link: #176b70;
+    color: var(--malendo-verification-text);
+}
+
+.malendo-verification-box,
+.malendo-verification-disclaimer,
+.malendo-verification-toc {
+    box-sizing: border-box;
+    margin: 24px 0;
+    border: 1px solid var(--malendo-verification-border, #d7dce2);
+    border-left: 4px solid #7b8490;
+    border-radius: 4px;
+    background: var(--malendo-verification-surface, #f7f8f9);
+    color: var(--malendo-verification-text, #24282d);
+}
+
+.malendo-verification-box {
+    padding: 18px 20px;
+}
+
+.malendo-verification-box--verified {
+    border-left-color: #3f7652;
+}
+
+.malendo-verification-box--developer-claim {
+    border-left-color: #7b6a35;
+}
+
+.malendo-verification-box--public-report {
+    border-left-color: #426d86;
+}
+
+.malendo-verification-box--inconsistency {
+    border-left-color: #8a623f;
+}
+
+.malendo-verification-box--buyer-question {
+    border-left-color: #685b86;
+}
+
+.malendo-verification-box__status,
+.malendo-verification-box__title,
+.malendo-last-checked,
+.malendo-verification-toc__title {
+    letter-spacing: 0;
+}
+
+.malendo-verification-box__status {
+    margin: 0 0 4px;
+    color: var(--malendo-verification-muted, #5d6570);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.4;
+    text-transform: uppercase;
+}
+
+.malendo-verification-box__title {
+    margin: 0 0 10px;
+    color: inherit;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.malendo-verification-box__content > :first-child,
+.malendo-verification-disclaimer > :first-child {
+    margin-top: 0;
+}
+
+.malendo-verification-box__content > :last-child,
+.malendo-verification-disclaimer > :last-child {
+    margin-bottom: 0;
+}
+
+.malendo-last-checked {
+    margin: 16px 0;
+    color: var(--malendo-verification-muted, #5d6570);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.malendo-last-checked__label {
+    font-weight: 700;
+}
+
+.malendo-verification-disclaimer {
+    padding: 16px 20px;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.malendo-verification-cta-wrap {
+    margin: 24px 0;
+}
+
+.malendo-verification-cta {
+    display: inline-flex;
+    min-height: 44px;
+    max-width: 100%;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 11px 18px;
+    border: 2px solid #1f5559;
+    border-radius: 4px;
+    background: #1f5559;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: center;
+    text-decoration: none;
+    white-space: normal;
+}
+
+.malendo-verification-cta:hover,
+.malendo-verification-cta:focus {
+    background: #fff;
+    color: #1f5559;
+    text-decoration: none;
+}
+
+.malendo-verification-cta:focus-visible,
+.malendo-verification-toc a:focus-visible,
+.malendo-source-table a:focus-visible {
+    outline: 3px solid #d49b3f;
+    outline-offset: 3px;
+}
+
+.malendo-verification-toc {
+    padding: 18px 20px;
+    border-left-color: #426d86;
+}
+
+.malendo-verification-toc__title {
+    margin: 0 0 10px;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.malendo-verification-toc__list {
+    margin: 0;
+    padding-left: 22px;
+}
+
+.malendo-verification-toc__item {
+    margin: 6px 0;
+}
+
+.malendo-verification-toc__item--h3 {
+    margin-left: 18px;
+}
+
+.malendo-verification-toc a,
+.malendo-source-table a {
+    color: var(--malendo-verification-link, #176b70);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.malendo-verification-table,
+.malendo-source-table,
+.malendo-project-facts,
+.malendo-developer-projects {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    margin: 24px 0;
+    overflow-x: auto;
+    border-collapse: collapse;
+    border-spacing: 0;
+    color: var(--malendo-verification-text, #24282d);
+    -webkit-overflow-scrolling: touch;
+}
+
+.malendo-verification-table caption,
+.malendo-source-table caption,
+.malendo-project-facts caption,
+.malendo-developer-projects caption {
+    padding: 0 0 10px;
+    color: inherit;
+    font-weight: 700;
+    text-align: left;
+}
+
+.malendo-verification-table th,
+.malendo-verification-table td,
+.malendo-source-table th,
+.malendo-source-table td,
+.malendo-project-facts th,
+.malendo-project-facts td,
+.malendo-developer-projects th,
+.malendo-developer-projects td {
+    min-width: 140px;
+    padding: 11px 12px;
+    border: 1px solid var(--malendo-verification-border, #d7dce2);
+    background: #fff;
+    line-height: 1.5;
+    text-align: left;
+    vertical-align: top;
+}
+
+.malendo-verification-table th,
+.malendo-source-table th,
+.malendo-project-facts th,
+.malendo-developer-projects th {
+    background: var(--malendo-verification-surface, #f7f8f9);
+    font-weight: 700;
+}
+
+@media (max-width: 640px) {
+    .malendo-verification-box,
+    .malendo-verification-disclaimer,
+    .malendo-verification-toc {
+        padding: 15px 16px;
+    }
+
+    .malendo-verification-cta {
+        width: 100%;
+    }
+}
