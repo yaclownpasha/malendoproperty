@@ -56,7 +56,7 @@ If a Page uses only the documented table classes, include at least one verificat
 9. Complete source, content, link, legal, and QA checks before publishing.
 10. Change Yoast to index only after owner/editor approval.
 
-The `malendo-verification-content` row class gives the components a stable content scope and theme variables. The table of contents can fall back to the nearest main content container, but the wrapper is recommended.
+The `malendo-verification-content` row class gives the components a stable content scope and theme variables. It is mandatory when using `[malendo_verification_toc]`. The TOC does not fall back to `main`, `article` or `document.body`; it stays hidden when the shortcode is not inside this wrapper.
 
 ## Verification status box
 
@@ -142,7 +142,7 @@ Custom text is rendered as escaped plain text. HTML and shortcodes are not suppo
 Syntax:
 
 ```text
-[malendo_verification_cta type="project-check" url="/request-a-project-check/" label="Request a Project Check"]
+[malendo_verification_cta type="project-check" url="/request-phuket-project-check/" label="Request a Project Check"]
 ```
 
 Allowed types and default labels:
@@ -158,18 +158,25 @@ Allowed types and default labels:
 Examples:
 
 ```text
-[malendo_verification_cta type="developer-check" url="/request-a-developer-check/" label="Request a Developer Check"]
+[malendo_verification_cta type="developer-check" url="/request-phuket-project-check/" label="Request a Developer Check"]
 
-[malendo_verification_cta type="current-availability" url="/contact/?topic=current-availability" label="Check Current Availability"]
+[malendo_verification_cta type="current-availability" url="/request-phuket-project-check/#current-availability" label="Check Current Availability"]
+
+[malendo_verification_cta type="compare-projects" url="/request-phuket-project-check/#compare-projects" label="Compare Projects"]
+
+[malendo_verification_cta type="send-documents" url="/request-phuket-project-check/#send-documents" label="Send Project Documents"]
 ```
 
 CTA safety:
 
 - The URL must be a relative internal path or an absolute URL on the current Malendo host.
 - External, protocol-relative, `javascript:`, `mailto:` and `tel:` destinations do not render.
+- For this MVP, use `/request-phuket-project-check/` and its approved `#current-availability`, `#compare-projects` and `#send-documents` anchors.
+- Same-host validation preserves the approved URL fragment so the CTA can reach the intended section on the shared landing Page.
+- Keep the documented CTA labels. Do not relabel a verification CTA with `Submit`, `Application` or `List your property`, because the existing global lead tracker intentionally treats those phrases as Submit/Application lead actions.
 - The shortcode creates a link only. It does not submit a form or block navigation.
 - Verify that the destination returns HTTP 200 before publishing.
-- Query parameters may contain public routing values such as `topic`; do not place names, emails, phone numbers, unit numbers, messages or document details in the URL.
+- Do not place names, emails, phone numbers, unit numbers, messages or document details in a CTA URL.
 
 ## Table of contents
 
@@ -181,12 +188,13 @@ Syntax:
 
 The shortcode renders an initially hidden navigation placeholder. On that Page only, the scoped script:
 
-- finds visible H2 and H3 headings in the closest verification/main content container;
-- excludes headings inside headers, footers and navigation;
+- requires the shortcode to be inside the closest `.malendo-verification-content` wrapper;
+- finds visible H2 and H3 headings only inside that wrapper;
+- excludes headings inside headers, footers, navigation, sidebars, asides and widgets;
 - preserves a unique existing heading ID;
 - generates a unique ID when an ID is missing or duplicated;
 - builds keyboard-accessible anchor links;
-- keeps the TOC hidden if no eligible headings exist.
+- keeps the TOC hidden if the wrapper is missing or no eligible headings exist.
 
 The script does not scan or change headings on Pages without the shortcode.
 
@@ -273,7 +281,7 @@ List the practical documents and professional checks appropriate to this develop
 <h2>Sources checked</h2>
 Add a table using the malendo-source-table class.
 
-[malendo_verification_cta type="developer-check" url="/request-a-developer-check/" label="Request a Developer Check"]
+[malendo_verification_cta type="developer-check" url="/request-phuket-project-check/" label="Request a Developer Check"]
 [malendo_verification_disclaimer]
 ```
 
@@ -303,8 +311,10 @@ Link only verified, active estate listings related to this project.
 <h2>Sources checked</h2>
 Add a table using the malendo-source-table class.
 
-[malendo_verification_cta type="project-check" url="/request-a-project-check/" label="Request a Project Check"]
-[malendo_verification_cta type="current-availability" url="/contact/?topic=current-availability" label="Check Current Availability"]
+[malendo_verification_cta type="project-check" url="/request-phuket-project-check/" label="Request a Project Check"]
+[malendo_verification_cta type="current-availability" url="/request-phuket-project-check/#current-availability" label="Check Current Availability"]
+[malendo_verification_cta type="compare-projects" url="/request-phuket-project-check/#compare-projects" label="Compare Projects"]
+[malendo_verification_cta type="send-documents" url="/request-phuket-project-check/#send-documents" label="Send Project Documents"]
 [malendo_verification_disclaimer]
 ```
 

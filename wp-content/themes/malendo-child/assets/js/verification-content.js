@@ -71,10 +71,7 @@
     }
 
     function tocContentRoot(toc) {
-        return toc.closest('.malendo-verification-content') ||
-            toc.closest('.entry-content, .page-content, article, main') ||
-            document.querySelector('.malendo-verification-content, main, article') ||
-            document.body;
+        return toc.closest('.malendo-verification-content');
     }
 
     function buildToc(toc) {
@@ -90,7 +87,7 @@
 
         headings = Array.prototype.slice.call(root.querySelectorAll('h2, h3')).filter(function (heading) {
             return !toc.contains(heading) &&
-                !heading.closest('header, footer, nav') &&
+                !heading.closest('header, footer, nav, aside, .widget, .widget-area, .sidebar, [role="complementary"], [role="navigation"]') &&
                 isVisible(heading) &&
                 heading.textContent.trim() !== '';
         });
