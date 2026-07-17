@@ -34,13 +34,20 @@ const cli = parseCli(process.argv.slice(2));
 const fetchCache = new Map();
 
 function parseCli(args) {
-  const result = { manifest: '', output: 'console', help: false };
+  const result = { manifest: '', snapshots: '', output: 'console', help: false };
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
 
     if (argument === '--manifest') {
       result.manifest = args[index + 1] || '';
+      index += 1;
+    } else if (argument === '--snapshots') {
+      const snapshotManifest = args[index + 1] || '';
+      if (!snapshotManifest || snapshotManifest.startsWith('--')) {
+        throw new Error('--snapshots requires a JSON file path');
+      }
+      result.snapshots = snapshotManifest;
       index += 1;
     } else if (argument === '--markdown') {
       result.output = 'markdown';
@@ -60,6 +67,9 @@ function usage() {
   return [
     'Usage:',
     '  node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json',
+    '  node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json --snapshots path/to/snapshots.json',
+    '  node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json --snapshots path/to/snapshots.json --markdown',
+    '  node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json --snapshots path/to/snapshots.json --json',
     '  node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json --markdown',
     '  node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json --json',
   ].join('\n');
@@ -324,6 +334,74 @@ function normalizeManifest(raw) {
   };
 }
 
+function snapshotLookupKey(value) {
+  return normalizedUrl(value, value, false);
+}
+
+async function loadSnapshots(snapshotManifestPath) {
+  const absoluteManifestPath = path.resolve(snapshotManifestPath);
+  let raw;
+
+  try {
+    raw = await readFile(absoluteManifestPath, 'utf8');
+  } catch (error) {
+    throw new Error(`Snapshot manifest could not be read (${error.code || 'read error'})`);
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('Snapshot manifest must contain valid JSON');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Snapshot manifest must be an object keyed by absolute Page URL');
+  }
+
+  const baseDirectory = path.dirname(absoluteManifestPath);
+  const snapshots = new Map();
+
+  for (const [pageUrl, snapshot] of Object.entries(parsed)) {
+    const key = snapshotLookupKey(pageUrl);
+    if (!key) throw new Error('Every snapshot key must be an absolute HTTP(S) Page URL');
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      throw new Error(`Snapshot configuration is invalid for ${redactUrl(pageUrl)}`);
+    }
+    if (typeof snapshot.htmlFile !== 'string' || !normalizeSpace(snapshot.htmlFile) || path.isAbsolute(snapshot.htmlFile)) {
+      throw new Error(`Snapshot htmlFile must be a relative path for ${redactUrl(pageUrl)}`);
+    }
+
+    const resolvedHtmlFile = path.resolve(baseDirectory, snapshot.htmlFile);
+    const relativeHtmlFile = path.relative(baseDirectory, resolvedHtmlFile);
+    if (relativeHtmlFile.startsWith('..') || path.isAbsolute(relativeHtmlFile)) {
+      throw new Error(`Snapshot htmlFile must stay within the snapshot manifest directory for ${redactUrl(pageUrl)}`);
+    }
+
+    const finalUrl = safeUrl(snapshot.finalUrl || pageUrl);
+    if (!finalUrl) throw new Error(`Snapshot finalUrl must be an absolute HTTP(S) URL for ${redactUrl(pageUrl)}`);
+    if (snapshots.has(key)) throw new Error(`Duplicate normalized snapshot URL: ${redactUrl(pageUrl)}`);
+
+    let html;
+    try {
+      html = await readFile(resolvedHtmlFile, 'utf8');
+    } catch (error) {
+      throw new Error(`Snapshot HTML could not be read for ${redactUrl(pageUrl)} (${error.code || 'read error'})`);
+    }
+
+    snapshots.set(key, { finalUrl: finalUrl.href, html });
+  }
+
+  return { fileName: path.basename(snapshotManifestPath), snapshots };
+}
+
+function findSnapshot(entry, snapshots) {
+  if (!snapshots.size) return null;
+  const pageKey = snapshotLookupKey(entry.url);
+  const canonicalKey = entry.expectedCanonical ? snapshotLookupKey(entry.expectedCanonical) : '';
+  return snapshots.get(pageKey) || (canonicalKey ? snapshots.get(canonicalKey) : null) || null;
+}
+
 function classificationFindings(html, text) {
   return CLASSIFICATIONS.filter(([slug, label]) => (
     html.includes(`malendo-verification-box--${slug}`) ||
@@ -410,14 +488,16 @@ function assignPageStatus(result) {
   return 'Ready for editorial approval';
 }
 
-async function auditPage(entry) {
+async function auditPage(entry, snapshot = null) {
+  const snapshotMode = Boolean(snapshot);
   const result = {
     pageName: entry.pageName,
     pageType: entry.pageType,
     requiresSources: entry.requiresSources,
     url: redactUrl(entry.url),
     finalUrl: '',
-    httpStatus: 0,
+    httpStatus: snapshotMode ? null : 0,
+    inputMode: snapshotMode ? 'snapshot' : 'network',
     status: '',
     unverifiable: false,
     metadata: {},
@@ -427,8 +507,10 @@ async function auditPage(entry) {
     ctaLinks: [],
     checks: [],
   };
-  const response = await fetchResource(entry.url);
-  result.httpStatus = response.status;
+  const response = snapshotMode
+    ? { ok: true, status: 0, finalUrl: snapshot.finalUrl, body: snapshot.html }
+    : await fetchResource(entry.url);
+  if (!snapshotMode) result.httpStatus = response.status;
   result.finalUrl = redactUrl(response.finalUrl);
 
   if (!response.ok) {
@@ -438,7 +520,7 @@ async function auditPage(entry) {
     return result;
   }
 
-  if (isAuthenticationResponse(entry.url, response)) {
+  if (!snapshotMode && isAuthenticationResponse(entry.url, response)) {
     result.unverifiable = true;
     addCheck(result, 'WARNING', 'preview', 'Authenticated preview required', `HTTP ${response.status}; public HTML checks were not attempted`);
     result.status = assignPageStatus(result);
@@ -446,7 +528,9 @@ async function auditPage(entry) {
     return result;
   }
 
-  if (response.status !== 200) {
+  if (snapshotMode) {
+    addCheck(result, 'SKIPPED', 'technical', 'HTTP accessibility', 'Local authenticated snapshot');
+  } else if (response.status !== 200) {
     addCheck(result, 'FAIL', 'technical', 'Page must return HTTP 200', `Received HTTP ${response.status}`);
   } else {
     addCheck(result, 'PASS', 'technical', 'HTTP status', 'HTTP 200');
@@ -547,15 +631,19 @@ async function auditPage(entry) {
     const sourceIdsMissingFromTable = requiredSourceIds.filter((id) => !sourceTableText.includes(id));
     addCheck(result, sourceIdsMissingFromTable.length ? 'FAIL' : 'PASS', 'source', 'Source IDs represented in source table', sourceIdsMissingFromTable.length ? `Missing from source table: ${sourceIdsMissingFromTable.join(', ')}` : `${requiredSourceIds.length} required source ID(s) represented`);
 
-    if (!sourceUrls.length) {
+    if (snapshotMode) {
+      addCheck(result, 'SKIPPED', 'source', 'Source URL accessibility', 'Local authenticated snapshot');
+    } else if (!sourceUrls.length) {
       addCheck(result, 'FAIL', 'source', 'Source URL accessibility', 'No source URLs to check');
     }
-    for (const sourceUrl of sourceUrls) {
-      const sourceResponse = await checkLinkedResource(sourceUrl);
-      const severity = sourceResponse.ok && sourceResponse.status >= 200 && sourceResponse.status < 400
-        ? 'PASS'
-        : (sourceResponse.ok && [401, 403, 429].includes(sourceResponse.status) ? 'WARNING' : 'FAIL');
-      addCheck(result, severity, 'source', 'Source URL accessibility', `${redactUrl(sourceUrl)} -> ${sourceResponse.status || sourceResponse.error}`);
+    if (!snapshotMode) {
+      for (const sourceUrl of sourceUrls) {
+        const sourceResponse = await checkLinkedResource(sourceUrl);
+        const severity = sourceResponse.ok && sourceResponse.status >= 200 && sourceResponse.status < 400
+          ? 'PASS'
+          : (sourceResponse.ok && [401, 403, 429].includes(sourceResponse.status) ? 'WARNING' : 'FAIL');
+        addCheck(result, severity, 'source', 'Source URL accessibility', `${redactUrl(sourceUrl)} -> ${sourceResponse.status || sourceResponse.error}`);
+      }
     }
   }
 
@@ -568,8 +656,12 @@ async function auditPage(entry) {
     const normalizedPath = ctaUrl.pathname === '/' ? '/' : `${ctaUrl.pathname.replace(/\/+$/, '')}/`;
     const approved = APPROVED_CTA_HOSTS.has(ctaUrl.hostname.toLowerCase()) && normalizedPath === APPROVED_CTA_PATH && ctaUrl.search === '' && APPROVED_CTA_HASHES.has(ctaUrl.hash);
     addCheck(result, approved ? 'PASS' : 'FAIL', 'links', 'Approved CTA host/path', approved ? redactUrlWithHash(ctaUrl.href) : `Not approved: ${redactUrlWithHash(ctaUrl.href)}`);
-    const ctaResponse = await checkLinkedResource(ctaUrl.href.split('#')[0]);
-    addCheck(result, ctaResponse.ok && ctaResponse.status >= 200 && ctaResponse.status < 400 ? 'PASS' : 'FAIL', 'links', 'CTA URL accessibility', `${redactUrl(ctaUrl.href)} -> ${ctaResponse.status || ctaResponse.error}`);
+    if (snapshotMode) {
+      addCheck(result, 'SKIPPED', 'links', 'CTA URL accessibility', 'Local authenticated snapshot');
+    } else {
+      const ctaResponse = await checkLinkedResource(ctaUrl.href.split('#')[0]);
+      addCheck(result, ctaResponse.ok && ctaResponse.status >= 200 && ctaResponse.status < 400 ? 'PASS' : 'FAIL', 'links', 'CTA URL accessibility', `${redactUrl(ctaUrl.href)} -> ${ctaResponse.status || ctaResponse.error}`);
+    }
   }
 
   const renderedNormalizedLinks = new Set(anchors.map((anchor) => normalizedUrl(anchor.href, response.finalUrl)).filter(Boolean));
@@ -581,8 +673,12 @@ async function auditPage(entry) {
   addCheck(result, missingInternalLinks.length ? 'FAIL' : 'PASS', 'links', 'Required internal links', missingInternalLinks.length ? `Missing: ${missingInternalLinks.map(redactUrl).join(', ')}` : `${requiredInternalLinks.length} required link(s) present`);
 
   for (const internalUrl of requiredInternalLinks) {
-    const internalResponse = await checkLinkedResource(internalUrl.split('#')[0]);
-    addCheck(result, internalResponse.ok && internalResponse.status >= 200 && internalResponse.status < 400 ? 'PASS' : 'FAIL', 'links', 'Internal link accessibility', `${redactUrl(internalUrl)} -> ${internalResponse.status || internalResponse.error}`);
+    if (snapshotMode) {
+      addCheck(result, 'SKIPPED', 'links', 'Internal link accessibility', 'Local authenticated snapshot');
+    } else {
+      const internalResponse = await checkLinkedResource(internalUrl.split('#')[0]);
+      addCheck(result, internalResponse.ok && internalResponse.status >= 200 && internalResponse.status < 400 ? 'PASS' : 'FAIL', 'links', 'Internal link accessibility', `${redactUrl(internalUrl)} -> ${internalResponse.status || internalResponse.error}`);
+    }
   }
 
   const oldDomains = oldDomainFindings(html, anchors);
@@ -622,17 +718,27 @@ async function auditPage(entry) {
   return result;
 }
 
-async function auditOrdinaryPage(entry) {
-  const response = await fetchResource(entry.url);
+async function auditOrdinaryPage(entry, snapshot = null) {
+  const snapshotMode = Boolean(snapshot);
+  const response = snapshotMode
+    ? { ok: true, status: 0, finalUrl: snapshot.finalUrl, body: snapshot.html }
+    : await fetchResource(entry.url);
   const result = {
     pageName: entry.pageName,
     url: redactUrl(entry.url),
     finalUrl: redactUrl(response.finalUrl),
-    httpStatus: response.status,
+    httpStatus: snapshotMode ? null : response.status,
+    inputMode: snapshotMode ? 'snapshot' : 'network',
     checks: [],
   };
 
-  if (!response.ok || response.status !== 200) {
+  if (snapshotMode) {
+    addCheck(result, 'SKIPPED', 'technical', 'HTTP accessibility', 'Local authenticated snapshot');
+    const cssPresent = /verification-content\.css(?:[?"'])/i.test(response.body);
+    const jsPresent = /verification-content\.js(?:[?"'])/i.test(response.body);
+    addCheck(result, cssPresent ? 'FAIL' : 'PASS', 'technical', 'Verification CSS absent', cssPresent ? 'Unexpectedly present' : 'Absent');
+    addCheck(result, jsPresent ? 'FAIL' : 'PASS', 'technical', 'Verification JavaScript absent', jsPresent ? 'Unexpectedly present' : 'Absent');
+  } else if (!response.ok || response.status !== 200) {
     addCheck(result, 'WARNING', 'ordinary-page', 'Ordinary page could not be verified', response.error || `HTTP ${response.status}`);
   } else {
     const cssPresent = /verification-content\.css(?:[?"'])/i.test(response.body);
@@ -645,12 +751,12 @@ async function auditOrdinaryPage(entry) {
   return result;
 }
 
-function aggregateReport(pages, ordinaryPages) {
+function aggregateReport(pages, ordinaryPages, snapshotManifest = '') {
   const allChecks = [...pages, ...ordinaryPages].flatMap((item) => item.checks);
   const warnings = ordinaryPages.length ? [] : ['Ordinary page asset-scope checks are not configured.'];
   const summary = checkSummary(allChecks);
   summary.WARNING += warnings.length;
-  return {
+  const report = {
     generatedAt: new Date().toISOString(),
     manifest: path.basename(cli.manifest),
     summary,
@@ -667,6 +773,8 @@ function aggregateReport(pages, ordinaryPages) {
       anchors: [...APPROVED_CTA_HASHES].filter(Boolean),
     },
   };
+  if (snapshotManifest) report.snapshotManifest = snapshotManifest;
+  return report;
 }
 
 function markdownEscape(value) {
@@ -692,6 +800,7 @@ function renderMarkdown(report) {
 
   for (const page of report.pages) {
     lines.push('', `## ${page.pageName}`, '', `- URL: ${page.url}`, `- Final URL: ${page.finalUrl || 'Unverified'}`, `- Status: **${page.status}**`, `- Sources required: ${page.requiresSources ? 'Yes' : 'No'}`);
+    if (page.inputMode === 'snapshot') lines.push('- Input: Local authenticated snapshot');
     if (page.metadata.title !== undefined) {
       lines.push(`- Title: ${page.metadata.title || 'Missing'}`, `- H1: ${page.metadata.h1Texts?.join(' | ') || 'Missing'}`, `- Robots: ${page.metadata.robots || 'Missing'}`, `- Canonical: ${page.metadata.canonical || 'Missing'}`);
     }
@@ -718,7 +827,7 @@ function renderMarkdown(report) {
     lines.push('', '## Report Warnings', '', ...report.warnings.map((warning) => `- ${warning}`));
   }
 
-  lines.push('', '## Safety Notes', '', '- This report is read-only and submits no forms.', '- Query strings and fragments are redacted from reported page/source URLs.', '- Keep pages Draft/noindex until every factual, source, link, formatting and indexing check is resolved.', '- Authenticated previews are reported as unverifiable; the script does not accept or store WordPress credentials.');
+  lines.push('', '## Safety Notes', '', '- This report is read-only and submits no forms.', '- Query strings and fragments are redacted from reported page/source URLs.', '- Local snapshot file paths are never included in reports.', '- Never commit authenticated HTML snapshots or snapshot manifests containing private filenames.', '- Keep pages Draft/noindex until every factual, source, link, formatting and indexing check is resolved.', '- Authenticated previews are reported as unverifiable unless supplied as local snapshots; the script does not accept or store WordPress credentials.');
   return lines.join('\n');
 }
 
@@ -730,7 +839,7 @@ function renderConsole(report) {
   ];
 
   for (const page of report.pages) {
-    lines.push(`${page.status}: ${page.pageName} (${page.httpStatus || 'no HTTP status'})`);
+    lines.push(`${page.status}: ${page.pageName} (${page.inputMode === 'snapshot' ? 'local snapshot' : (page.httpStatus || 'no HTTP status')})`);
     for (const check of page.checks.filter((item) => item.severity !== 'PASS')) {
       lines.push(`  ${check.severity} ${check.label}: ${check.detail}`);
     }
@@ -756,13 +865,16 @@ async function main() {
   if (!cli.manifest) throw new Error(`--manifest is required\n\n${usage()}`);
 
   const manifest = normalizeManifest(await readFile(cli.manifest, 'utf8'));
+  const snapshotData = cli.snapshots
+    ? await loadSnapshots(cli.snapshots)
+    : { fileName: '', snapshots: new Map() };
   const pages = [];
   const ordinaryPages = [];
 
-  for (const entry of manifest.pages) pages.push(await auditPage(entry));
-  for (const entry of manifest.ordinaryPages) ordinaryPages.push(await auditOrdinaryPage(entry));
+  for (const entry of manifest.pages) pages.push(await auditPage(entry, findSnapshot(entry, snapshotData.snapshots)));
+  for (const entry of manifest.ordinaryPages) ordinaryPages.push(await auditOrdinaryPage(entry, findSnapshot(entry, snapshotData.snapshots)));
 
-  const report = aggregateReport(pages, ordinaryPages);
+  const report = aggregateReport(pages, ordinaryPages, snapshotData.fileName);
   if (cli.output === 'json') console.log(JSON.stringify(report, null, 2));
   else if (cli.output === 'markdown') console.log(renderMarkdown(report));
   else console.log(renderConsole(report));

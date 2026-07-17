@@ -4,13 +4,13 @@
 
 `scripts/check-malendo-verification-pages.mjs` is a read-only QA tool for Malendo developer and project verification Pages. Run it when a public URL or an authenticated-preview URL is available and before asking an editor to approve indexing.
 
-The tool fetches HTML and linked resources only. It does not log in, submit forms, change WordPress, write to the database, or mutate production.
+The tool reads local HTML snapshots or fetches HTML and linked resources. It does not log in, submit forms, change WordPress, write to the database, or mutate production.
 
 ## Requirements
 
 - Node.js 18 or newer with built-in `fetch`;
 - a local JSON manifest;
-- network access to each Page and source URL being checked.
+- network access to each Page and source URL being checked, unless local snapshots are supplied.
 
 No npm install or API credential is required.
 
@@ -35,6 +35,17 @@ JSON report:
 ```bash
 node scripts/check-malendo-verification-pages.mjs --manifest path/to/pages.json --json
 ```
+
+Authenticated local snapshots:
+
+```bash
+node scripts/check-malendo-verification-pages.mjs \
+  --manifest phase1-page-manifest.json \
+  --snapshots phase1-snapshots.json \
+  --markdown
+```
+
+Use `--json` or omit the output flag for JSON or console output in the same way as network mode.
 
 Help:
 
@@ -118,6 +129,45 @@ A manifest is invalid when `requiresSources` is not a boolean, when a developer/
 
 Add at least one unrelated normal Page to `ordinaryPages`. The checker confirms that `verification-content.css` and `verification-content.js` are absent there. This validates that verification assets remain page-scoped.
 
+## Local authenticated snapshots
+
+Use snapshots when a WordPress Draft or preview requires an authenticated browser session. Export the fully rendered HTML locally, then create a private JSON mapping next to a private snapshots directory:
+
+```json
+{
+  "https://malendo-property.com/project-check-methodology-phuket/": {
+    "htmlFile": "private-snapshots/methodology.html",
+    "finalUrl": "https://malendo-property.com/project-check-methodology-phuket/"
+  },
+  "https://malendo-property.com/request-phuket-project-check/": {
+    "htmlFile": "private-snapshots/request.html",
+    "finalUrl": "https://malendo-property.com/request-phuket-project-check/"
+  }
+}
+```
+
+Snapshot keys must be absolute HTTP(S) Page URLs. `htmlFile` must be a relative path inside the snapshot manifest directory; absolute paths and `..` traversal are rejected. `finalUrl` must be the public URL represented by the rendered HTML.
+
+The checker matches a snapshot by the Page `url`, falling back to `expectedCanonical`. Pages without a matching snapshot continue through the existing network mode. This permits a mixed report without changing network behavior.
+
+For a snapshot Page, all HTML checks still run: metadata, H1, robots, canonical, wrapper, last-checked block, disclaimer, classifications, source requirements, rendered CTA/internal links, duplicate IDs, raw shortcodes, asset markers, schema, risky wording, and old domains.
+
+The checker does not make Page, source, CTA, or required internal-link requests for a snapshot Page. These accessibility checks report:
+
+```text
+SKIPPED: Local authenticated snapshot
+```
+
+Presence in exported HTML is not proof that a destination works. Complete accessibility checks after the Page has an owner-approved public URL.
+
+### Snapshot privacy
+
+- Never commit exported authenticated HTML or a private snapshot manifest.
+- Never include cookies, authorization headers, passwords, preview nonces, form values, or personal data.
+- Store snapshot files outside Git or in a locally ignored private directory.
+- Inspect exports before use because rendered HTML can contain admin-bar details or private preview URLs.
+- Reports include only the snapshot manifest basename and Page URLs. Absolute local file paths are never printed.
+
 ## Approved CTA destinations
 
 Verification CTA links must use the Malendo host and this path:
@@ -164,13 +214,15 @@ For every verification Page, the script checks:
 22. Absence of Review and AggregateRating schema.
 23. Conservative unsupported guarantee/yield wording patterns.
 
+In snapshot mode, all HTTP accessibility checks are `SKIPPED`; every applicable HTML check above remains active.
+
 The tool also checks that verification CSS/JS are absent from configured ordinary Pages.
 
 ## Preview handling
 
 The script does not accept WordPress credentials or cookies. A response is marked `Unverifiable without authenticated preview` when it returns HTTP 401/403, redirects to `wp-login.php`, or displays a WordPress login form for a preview URL.
 
-This is not a content failure. Open the preview in an authenticated browser and complete the same checks manually, or provide a temporary owner-approved public noindex URL. Never paste credentials or private cookies into the manifest.
+This is not a content failure. Open the preview in an authenticated browser and export its rendered HTML for snapshot mode, complete the checks manually, or provide a temporary owner-approved public noindex URL. Never paste credentials or private cookies into either manifest.
 
 ## Page statuses
 
@@ -198,7 +250,7 @@ Warnings, including an authenticated preview that cannot be inspected, do not al
 
 ## Report privacy
 
-Page, source, CTA, and internal-link query strings are not printed. URL fragments are printed only for approved CTA reporting. The script does not report anchor text as an analytics payload and does not send analytics events itself.
+Page, source, CTA, and internal-link query strings are not printed. URL fragments are printed only for approved CTA reporting. Snapshot reports never expose absolute local file paths. The script does not report anchor text as an analytics payload and does not send analytics events itself.
 
 The script never submits forms. Requests use a fixed user agent and a timeout. Source and destination checks use `HEAD` where possible, with a small ranged `GET` fallback only when a server rejects `HEAD`.
 
@@ -221,12 +273,13 @@ If a Page neutrally quotes such wording as a developer claim or warning, an edit
 1. Keep the WordPress Page as Draft.
 2. Set Yoast to `noindex,nofollow` before exposing a public pre-approval URL.
 3. Prepare a local manifest with exact expected metadata, links, CTA destinations, and source IDs.
-4. Run the Markdown report.
-5. Correct factual and source failures first.
-6. Correct links, formatting, robots, and canonical issues.
-7. Rerun until no failures remain.
-8. Complete manual legal/editorial review and browser QA.
-9. Obtain owner/editor approval before changing indexation.
+4. For an authenticated Draft, export rendered HTML and prepare a private snapshot mapping outside Git.
+5. Run the Markdown report in network or snapshot mode.
+6. Correct factual and source failures first.
+7. Correct links, formatting, robots, and canonical issues.
+8. Rerun until no failures remain.
+9. Complete manual legal/editorial review and browser QA.
+10. Obtain owner/editor approval before changing indexation.
 
 ## Manual checks still required
 
@@ -250,3 +303,5 @@ This tool is local and read-only. To remove it, revert the PR that added:
 - `docs/malendo-verification-pages.example.json`.
 
 No production rollback or cache clear is required because the tool does not deploy or alter WordPress.
+
+Delete private snapshot exports locally when they are no longer needed. They are not repository artifacts and must never be committed.
