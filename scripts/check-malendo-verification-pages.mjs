@@ -8,6 +8,10 @@ const USER_AGENT = 'MalendoVerificationPageQA/1.0 (+https://malendo-property.com
 const APPROVED_CTA_HOSTS = new Set(['malendo-property.com', 'www.malendo-property.com']);
 const APPROVED_CTA_PATH = '/request-phuket-project-check/';
 const APPROVED_CTA_HASHES = new Set(['', '#current-availability', '#compare-projects', '#send-documents']);
+const BROWSER_SNAPSHOT_CAPABILITY = 'browser-rendered';
+const REST_SNAPSHOT_CAPABILITY = 'rest-derived';
+const REST_SNAPSHOT_SKIP_DETAIL = 'REST-derived snapshot';
+const REST_SNAPSHOT_READY_STATUS = 'CONTENT STRUCTURALLY READY — BROWSER QA PENDING';
 const VERIFICATION_TABLE_CLASSES = new Set([
   'malendo-verification-table',
   'malendo-source-table',
@@ -274,9 +278,12 @@ function validateManifestEntry(entry, index) {
   if (!normalizeSpace(entry.pageName)) throw new Error(`pages[${index}].pageName is required`);
   if (!safeUrl(entry.url)) throw new Error(`pages[${index}].url must be an absolute HTTP(S) URL`);
 
-  for (const field of ['requiredInternalLinks', 'requiredCtaLinks', 'requiredSourceIds']) {
+  for (const field of ['requiredInternalLinks', 'requiredCtaLinks', 'requiredSourceIds', 'requiredTexts', 'requiredAnchorIds', 'requiredCtaLabels']) {
     if (entry[field] !== undefined && !Array.isArray(entry[field])) {
       throw new Error(`pages[${index}].${field} must be an array`);
+    }
+    if (entry[field]?.some((value) => typeof value !== 'string' || !normalizeSpace(value))) {
+      throw new Error(`pages[${index}].${field} must contain non-empty strings`);
     }
   }
 
@@ -307,6 +314,9 @@ function validateManifestEntry(entry, index) {
     requiredInternalLinks: entry.requiredInternalLinks || [],
     requiredCtaLinks: entry.requiredCtaLinks || [],
     requiredSourceIds,
+    requiredTexts: (entry.requiredTexts || []).map(normalizeSpace),
+    requiredAnchorIds: (entry.requiredAnchorIds || []).map((id) => normalizeSpace(id).replace(/^#/, '')),
+    requiredCtaLabels: (entry.requiredCtaLabels || []).map(normalizeSpace),
   };
 }
 
@@ -368,6 +378,9 @@ async function loadSnapshots(snapshotManifestPath) {
     if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
       throw new Error(`Snapshot configuration is invalid for ${redactUrl(pageUrl)}`);
     }
+    if (snapshot.browserRenderedSnapshot !== undefined && typeof snapshot.browserRenderedSnapshot !== 'boolean') {
+      throw new Error(`Snapshot browserRenderedSnapshot must be true or false for ${redactUrl(pageUrl)}`);
+    }
     if (typeof snapshot.htmlFile !== 'string' || !normalizeSpace(snapshot.htmlFile) || path.isAbsolute(snapshot.htmlFile)) {
       throw new Error(`Snapshot htmlFile must be a relative path for ${redactUrl(pageUrl)}`);
     }
@@ -380,6 +393,16 @@ async function loadSnapshots(snapshotManifestPath) {
 
     const finalUrl = safeUrl(snapshot.finalUrl || pageUrl);
     if (!finalUrl) throw new Error(`Snapshot finalUrl must be an absolute HTTP(S) URL for ${redactUrl(pageUrl)}`);
+    if (snapshot.robots !== undefined && typeof snapshot.robots !== 'string') {
+      throw new Error(`Snapshot robots must be a string for ${redactUrl(pageUrl)}`);
+    }
+    if (snapshot.canonical !== undefined && typeof snapshot.canonical !== 'string') {
+      throw new Error(`Snapshot canonical must be a string for ${redactUrl(pageUrl)}`);
+    }
+    const suppliedCanonical = snapshot.canonical ? safeUrl(snapshot.canonical, finalUrl.href) : null;
+    if (snapshot.canonical && !suppliedCanonical) {
+      throw new Error(`Snapshot canonical must be an HTTP(S) URL for ${redactUrl(pageUrl)}`);
+    }
     if (snapshots.has(key)) throw new Error(`Duplicate normalized snapshot URL: ${redactUrl(pageUrl)}`);
 
     let html;
@@ -389,7 +412,13 @@ async function loadSnapshots(snapshotManifestPath) {
       throw new Error(`Snapshot HTML could not be read for ${redactUrl(pageUrl)} (${error.code || 'read error'})`);
     }
 
-    snapshots.set(key, { finalUrl: finalUrl.href, html });
+    snapshots.set(key, {
+      finalUrl: finalUrl.href,
+      html,
+      browserRenderedSnapshot: snapshot.browserRenderedSnapshot ?? true,
+      robots: normalizeSpace(snapshot.robots),
+      canonical: suppliedCanonical?.href || '',
+    });
   }
 
   return { fileName: path.basename(snapshotManifestPath), snapshots };
@@ -420,8 +449,8 @@ function extractCtaAnchors(anchors) {
   ));
 }
 
-function findDuplicateIds(html) {
-  const counts = new Map();
+function extractElementIds(html) {
+  const ids = [];
   const markup = String(html || '')
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -430,11 +459,25 @@ function findDuplicateIds(html) {
   let match;
 
   while ((match = pattern.exec(markup)) !== null) {
-    const id = match[1] || match[2];
-    counts.set(id, (counts.get(id) || 0) + 1);
+    ids.push(match[1] || match[2]);
   }
 
+  return ids;
+}
+
+function findDuplicateIds(html) {
+  const counts = new Map();
+  for (const id of extractElementIds(html)) counts.set(id, (counts.get(id) || 0) + 1);
+
   return [...counts.entries()].filter(([, count]) => count > 1).map(([id, count]) => ({ id, count }));
+}
+
+function cf7PlaceholderFindings(html, text) {
+  const findings = new Set();
+  if (/\[contact-form-7\b[^\]]*\]/i.test(html)) findings.add('Raw [contact-form-7] shortcode');
+  if (/\b(?:CF7|Contact Form 7)\s+(?:form\s+)?placeholder\b/i.test(text)) findings.add('Contact Form 7 placeholder text');
+  if (/(?:\{\{|\[\[)[^\]}\]]*(?:cf7|contact[ _-]?form)[^\]}\]]*(?:\}\}|\]\])/i.test(html)) findings.add('Template-style Contact Form 7 placeholder');
+  return [...findings];
 }
 
 function schemaTypes(html) {
@@ -484,12 +527,14 @@ function assignPageStatus(result) {
   if (failedCategories.has('source')) return 'Needs source correction';
   if (failedCategories.has('links')) return 'Missing CTA/internal links';
   if (failedCategories.has('formatting') || failedCategories.has('technical')) return 'Needs formatting correction';
+  if (result.snapshotCapability === REST_SNAPSHOT_CAPABILITY) return REST_SNAPSHOT_READY_STATUS;
   if (result.checks.some((check) => check.severity === 'WARNING')) return 'Keep Draft/noindex';
   return 'Ready for editorial approval';
 }
 
 async function auditPage(entry, snapshot = null) {
   const snapshotMode = Boolean(snapshot);
+  const restSnapshotMode = snapshotMode && snapshot.browserRenderedSnapshot === false;
   const result = {
     pageName: entry.pageName,
     pageType: entry.pageType,
@@ -498,6 +543,9 @@ async function auditPage(entry, snapshot = null) {
     finalUrl: '',
     httpStatus: snapshotMode ? null : 0,
     inputMode: snapshotMode ? 'snapshot' : 'network',
+    snapshotCapability: snapshotMode
+      ? (restSnapshotMode ? REST_SNAPSHOT_CAPABILITY : BROWSER_SNAPSHOT_CAPABILITY)
+      : 'network',
     status: '',
     unverifiable: false,
     metadata: {},
@@ -529,7 +577,13 @@ async function auditPage(entry, snapshot = null) {
   }
 
   if (snapshotMode) {
-    addCheck(result, 'SKIPPED', 'technical', 'HTTP accessibility', 'Local authenticated snapshot');
+    addCheck(
+      result,
+      'SKIPPED',
+      'technical',
+      restSnapshotMode ? 'Logged-out accessibility' : 'HTTP accessibility',
+      restSnapshotMode ? REST_SNAPSHOT_SKIP_DETAIL : 'Local authenticated snapshot',
+    );
   } else if (response.status !== 200) {
     addCheck(result, 'FAIL', 'technical', 'Page must return HTTP 200', `Received HTTP ${response.status}`);
   } else {
@@ -546,7 +600,10 @@ async function auditPage(entry, snapshot = null) {
 
   const html = response.body;
   const text = visibleText(html);
-  const metadata = extractMetadata(html);
+  const documentMetadata = extractMetadata(html);
+  const metadata = restSnapshotMode
+    ? { title: '', description: '', headings: [], robots: snapshot.robots, canonical: snapshot.canonical }
+    : documentMetadata;
   const anchors = extractAnchors(html);
   result.metadata = {
     title: metadata.title,
@@ -557,36 +614,50 @@ async function auditPage(entry, snapshot = null) {
     canonical: metadata.canonical ? redactUrl(metadata.canonical) : '',
   };
 
-  if (!metadata.title) {
-    addCheck(result, 'FAIL', 'formatting', 'Title', 'Missing title');
-  } else if (entry.expectedTitle && normalizeSpace(metadata.title) !== entry.expectedTitle) {
-    addCheck(result, 'FAIL', 'formatting', 'Title', `Expected "${entry.expectedTitle}"; found "${metadata.title}"`);
+  if (restSnapshotMode) {
+    addCheck(result, 'SKIPPED', 'formatting', 'Document title', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'formatting', 'Meta description', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'formatting', 'Full-document H1 count', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'formatting', 'Theme-generated H1', REST_SNAPSHOT_SKIP_DETAIL);
   } else {
-    addCheck(result, 'PASS', 'formatting', 'Title', metadata.title);
+    if (!metadata.title) {
+      addCheck(result, 'FAIL', 'formatting', 'Title', 'Missing title');
+    } else if (entry.expectedTitle && normalizeSpace(metadata.title) !== entry.expectedTitle) {
+      addCheck(result, 'FAIL', 'formatting', 'Title', `Expected "${entry.expectedTitle}"; found "${metadata.title}"`);
+    } else {
+      addCheck(result, 'PASS', 'formatting', 'Title', metadata.title);
+    }
+
+    addCheck(result, metadata.description ? 'PASS' : 'FAIL', 'formatting', 'Meta description', metadata.description || 'Missing meta description');
+
+    if (metadata.headings.length !== 1) {
+      addCheck(result, 'FAIL', 'formatting', 'Exactly one H1', `Found ${metadata.headings.length}`);
+    } else if (entry.expectedH1 && metadata.headings[0].text !== entry.expectedH1) {
+      addCheck(result, 'FAIL', 'formatting', 'Expected H1', `Expected "${entry.expectedH1}"; found "${metadata.headings[0].text}"`);
+    } else {
+      addCheck(result, 'PASS', 'formatting', 'H1', metadata.headings[0].text);
+    }
   }
 
-  addCheck(result, metadata.description ? 'PASS' : 'FAIL', 'formatting', 'Meta description', metadata.description || 'Missing meta description');
-
-  if (metadata.headings.length !== 1) {
-    addCheck(result, 'FAIL', 'formatting', 'Exactly one H1', `Found ${metadata.headings.length}`);
-  } else if (entry.expectedH1 && metadata.headings[0].text !== entry.expectedH1) {
-    addCheck(result, 'FAIL', 'formatting', 'Expected H1', `Expected "${entry.expectedH1}"; found "${metadata.headings[0].text}"`);
+  if (restSnapshotMode && !metadata.robots) {
+    addCheck(result, 'SKIPPED', 'indexing', 'Public pre-approval robots safety', `${REST_SNAPSHOT_SKIP_DETAIL}; no robots metadata supplied`);
+    addCheck(result, 'SKIPPED', 'indexing', 'Robots meta', `${REST_SNAPSHOT_SKIP_DETAIL}; no robots metadata supplied`);
   } else {
-    addCheck(result, 'PASS', 'formatting', 'H1', metadata.headings[0].text);
+    const actualRobots = robotsTokens(metadata.robots);
+    const expectedRobots = robotsTokens(entry.expectedRobots);
+    const preApprovalRobotsSafe = actualRobots.has('noindex') && actualRobots.has('nofollow');
+    addCheck(result, preApprovalRobotsSafe ? 'PASS' : 'FAIL', 'indexing', 'Public pre-approval robots safety', preApprovalRobotsSafe ? 'noindex,nofollow present' : `Expected noindex,nofollow; found: ${metadata.robots || '(none)'}`);
+    if (!entry.expectedRobots) {
+      addCheck(result, 'WARNING', 'indexing', 'Expected robots not configured', 'Set expectedRobots in the manifest; pre-approval pages should use noindex,nofollow');
+    } else {
+      const missingRobots = [...expectedRobots].filter((token) => !actualRobots.has(token));
+      addCheck(result, missingRobots.length ? 'FAIL' : 'PASS', 'indexing', 'Robots meta', missingRobots.length ? `Missing: ${missingRobots.join(', ')}; found: ${metadata.robots || '(none)'}` : metadata.robots);
+    }
   }
 
-  const actualRobots = robotsTokens(metadata.robots);
-  const expectedRobots = robotsTokens(entry.expectedRobots);
-  const preApprovalRobotsSafe = actualRobots.has('noindex') && actualRobots.has('nofollow');
-  addCheck(result, preApprovalRobotsSafe ? 'PASS' : 'FAIL', 'indexing', 'Public pre-approval robots safety', preApprovalRobotsSafe ? 'noindex,nofollow present' : `Expected noindex,nofollow; found: ${metadata.robots || '(none)'}`);
-  if (!entry.expectedRobots) {
-    addCheck(result, 'WARNING', 'indexing', 'Expected robots not configured', 'Set expectedRobots in the manifest; pre-approval pages should use noindex,nofollow');
-  } else {
-    const missingRobots = [...expectedRobots].filter((token) => !actualRobots.has(token));
-    addCheck(result, missingRobots.length ? 'FAIL' : 'PASS', 'indexing', 'Robots meta', missingRobots.length ? `Missing: ${missingRobots.join(', ')}; found: ${metadata.robots || '(none)'}` : metadata.robots);
-  }
-
-  if (!metadata.canonical) {
+  if (restSnapshotMode && !metadata.canonical) {
+    addCheck(result, 'SKIPPED', 'indexing', 'Canonical', `${REST_SNAPSHOT_SKIP_DETAIL}; no canonical metadata supplied`);
+  } else if (!metadata.canonical) {
     addCheck(result, 'FAIL', 'indexing', 'Canonical', 'Missing canonical');
   } else if (entry.expectedCanonical && normalizedUrl(metadata.canonical, response.finalUrl) !== normalizedUrl(entry.expectedCanonical, response.finalUrl)) {
     addCheck(result, 'FAIL', 'indexing', 'Canonical', `Expected ${redactUrl(entry.expectedCanonical)}; found ${redactUrl(metadata.canonical)}`);
@@ -603,6 +674,22 @@ async function auditPage(entry, snapshot = null) {
 
   result.classifications = classificationFindings(html, text);
   addCheck(result, result.classifications.length ? 'PASS' : 'FAIL', 'formatting', 'Verification classifications', result.classifications.join(', ') || 'No rendered classifications found');
+  if (restSnapshotMode) {
+    const boxes = extractElements(html, 'section').filter((element) => hasClass(element.attributes.class, 'malendo-verification-box'));
+    const emptyBoxes = boxes.filter((box) => {
+      const content = extractElements(box.html, 'div').find((element) => hasClass(element.attributes.class, 'malendo-verification-box__content'));
+      return !content?.text;
+    });
+    addCheck(result, boxes.length && !emptyBoxes.length ? 'PASS' : 'FAIL', 'formatting', 'Verification-box content', !boxes.length ? 'No verification boxes found' : (emptyBoxes.length ? `${emptyBoxes.length} box(es) have empty content` : `${boxes.length} box(es) contain content`));
+
+    if (entry.requiredTexts.length) {
+      const lowerText = text.toLowerCase();
+      const missingTexts = entry.requiredTexts.filter((requiredText) => !lowerText.includes(normalizeSpace(requiredText).toLowerCase()));
+      addCheck(result, missingTexts.length ? 'FAIL' : 'PASS', 'factual', 'Approved required text', missingTexts.length ? `Missing ${missingTexts.length} configured text item(s)` : `${entry.requiredTexts.length} configured text item(s) present`);
+    } else {
+      addCheck(result, 'SKIPPED', 'factual', 'Approved required text', 'No requiredTexts configured in the Page manifest');
+    }
+  }
 
   result.sourceIds = [...new Set([...text.matchAll(/\[S\d{2,}\]/gi)].map((match) => match[0].toUpperCase()))];
   const requiredSourceIds = entry.requiredSourceIds.map((id) => String(id).toUpperCase());
@@ -632,7 +719,7 @@ async function auditPage(entry, snapshot = null) {
     addCheck(result, sourceIdsMissingFromTable.length ? 'FAIL' : 'PASS', 'source', 'Source IDs represented in source table', sourceIdsMissingFromTable.length ? `Missing from source table: ${sourceIdsMissingFromTable.join(', ')}` : `${requiredSourceIds.length} required source ID(s) represented`);
 
     if (snapshotMode) {
-      addCheck(result, 'SKIPPED', 'source', 'Source URL accessibility', 'Local authenticated snapshot');
+      addCheck(result, 'SKIPPED', 'source', 'Source URL accessibility', restSnapshotMode ? REST_SNAPSHOT_SKIP_DETAIL : 'Local authenticated snapshot');
     } else if (!sourceUrls.length) {
       addCheck(result, 'FAIL', 'source', 'Source URL accessibility', 'No source URLs to check');
     }
@@ -651,13 +738,19 @@ async function auditPage(entry, snapshot = null) {
   const ctaUrls = ctaAnchors.map((anchor) => safeUrl(anchor.href, response.finalUrl)).filter(Boolean);
   result.ctaLinks = ctaUrls.map((url) => redactUrlWithHash(url.href));
   addCheck(result, ctaUrls.length ? 'PASS' : 'FAIL', 'links', 'Verification CTA links', ctaUrls.length ? `${ctaUrls.length} CTA link(s)` : 'No rendered verification CTA links');
+  if (restSnapshotMode) {
+    const renderedCtaLabels = ctaAnchors.map((anchor) => normalizeSpace(anchor.text)).filter(Boolean);
+    const missingCtaLabels = entry.requiredCtaLabels.filter((label) => !renderedCtaLabels.includes(normalizeSpace(label)));
+    const emptyCtaLabels = ctaAnchors.length - renderedCtaLabels.length;
+    addCheck(result, emptyCtaLabels || missingCtaLabels.length ? 'FAIL' : 'PASS', 'links', 'CTA labels', emptyCtaLabels ? `${emptyCtaLabels} CTA link(s) have no label` : (missingCtaLabels.length ? `Missing ${missingCtaLabels.length} configured CTA label(s)` : `${renderedCtaLabels.length} CTA label(s) present`));
+  }
 
   for (const ctaUrl of ctaUrls) {
     const normalizedPath = ctaUrl.pathname === '/' ? '/' : `${ctaUrl.pathname.replace(/\/+$/, '')}/`;
     const approved = APPROVED_CTA_HOSTS.has(ctaUrl.hostname.toLowerCase()) && normalizedPath === APPROVED_CTA_PATH && ctaUrl.search === '' && APPROVED_CTA_HASHES.has(ctaUrl.hash);
     addCheck(result, approved ? 'PASS' : 'FAIL', 'links', 'Approved CTA host/path', approved ? redactUrlWithHash(ctaUrl.href) : `Not approved: ${redactUrlWithHash(ctaUrl.href)}`);
     if (snapshotMode) {
-      addCheck(result, 'SKIPPED', 'links', 'CTA URL accessibility', 'Local authenticated snapshot');
+      addCheck(result, 'SKIPPED', 'links', 'CTA URL accessibility', restSnapshotMode ? REST_SNAPSHOT_SKIP_DETAIL : 'Local authenticated snapshot');
     } else {
       const ctaResponse = await checkLinkedResource(ctaUrl.href.split('#')[0]);
       addCheck(result, ctaResponse.ok && ctaResponse.status >= 200 && ctaResponse.status < 400 ? 'PASS' : 'FAIL', 'links', 'CTA URL accessibility', `${redactUrl(ctaUrl.href)} -> ${ctaResponse.status || ctaResponse.error}`);
@@ -674,7 +767,7 @@ async function auditPage(entry, snapshot = null) {
 
   for (const internalUrl of requiredInternalLinks) {
     if (snapshotMode) {
-      addCheck(result, 'SKIPPED', 'links', 'Internal link accessibility', 'Local authenticated snapshot');
+      addCheck(result, 'SKIPPED', 'links', 'Internal link accessibility', restSnapshotMode ? REST_SNAPSHOT_SKIP_DETAIL : 'Local authenticated snapshot');
     } else {
       const internalResponse = await checkLinkedResource(internalUrl.split('#')[0]);
       addCheck(result, internalResponse.ok && internalResponse.status >= 200 && internalResponse.status < 400 ? 'PASS' : 'FAIL', 'links', 'Internal link accessibility', `${redactUrl(internalUrl)} -> ${internalResponse.status || internalResponse.error}`);
@@ -686,29 +779,61 @@ async function auditPage(entry, snapshot = null) {
 
   const rawShortcodes = [...new Set([...text.matchAll(/\[(?:\/?malendo_[a-z0-9_-]+)[^\]]*\]/gi)].map((match) => match[0]))];
   addCheck(result, rawShortcodes.length ? 'FAIL' : 'PASS', 'formatting', 'Raw shortcode leakage', rawShortcodes.join(', ') || 'None');
+  if (restSnapshotMode) {
+    const cf7Placeholders = cf7PlaceholderFindings(html, text);
+    addCheck(result, cf7Placeholders.length ? 'FAIL' : 'PASS', 'formatting', 'CF7 placeholder status', cf7Placeholders.join(', ') || 'No unresolved placeholder found');
+  }
 
   const verificationCss = /verification-content\.css(?:[?"'])/i.test(html);
   const verificationJs = /verification-content\.js(?:[?"'])/i.test(html);
-  addCheck(result, verificationCss ? 'PASS' : 'FAIL', 'technical', 'Verification CSS', verificationCss ? 'Present' : 'Missing');
-  addCheck(result, verificationJs ? 'PASS' : 'FAIL', 'technical', 'Verification JavaScript', verificationJs ? 'Present' : 'Missing');
+  if (restSnapshotMode) {
+    addCheck(result, 'SKIPPED', 'technical', 'Verification CSS loading/execution', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'technical', 'Verification JavaScript loading/execution', REST_SNAPSHOT_SKIP_DETAIL);
+  } else {
+    addCheck(result, verificationCss ? 'PASS' : 'FAIL', 'technical', 'Verification CSS', verificationCss ? 'Present' : 'Missing');
+    addCheck(result, verificationJs ? 'PASS' : 'FAIL', 'technical', 'Verification JavaScript', verificationJs ? 'Present' : 'Missing');
+  }
 
   const wrapperPresent = /class=["'][^"']*\bmalendo-verification-content\b[^"']*["']/i.test(html);
   addCheck(result, wrapperPresent ? 'PASS' : 'FAIL', 'formatting', 'Verification content wrapper', wrapperPresent ? 'Present' : 'Missing .malendo-verification-content wrapper');
   const tables = extractElements(html, 'table');
   const unstyledTables = tables.filter((table) => ![...classTokens(table.attributes.class)].some((className) => VERIFICATION_TABLE_CLASSES.has(className)));
-  addCheck(result, unstyledTables.length ? 'FAIL' : 'PASS', 'formatting', 'Responsive table classes', unstyledTables.length ? `${unstyledTables.length} table(s) lack an approved verification class` : `${tables.length} table(s) use approved classes`);
+  if (restSnapshotMode) {
+    addCheck(result, 'SKIPPED', 'formatting', 'Responsive rendering', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'formatting', 'Visual TOC behavior', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'formatting', 'Visible WPBakery markup', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'technical', 'Header/footer/sidebar DOM', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'technical', 'Complete browser head/body structure', REST_SNAPSHOT_SKIP_DETAIL);
+  } else {
+    addCheck(result, unstyledTables.length ? 'FAIL' : 'PASS', 'formatting', 'Responsive table classes', unstyledTables.length ? `${unstyledTables.length} table(s) lack an approved verification class` : `${tables.length} table(s) use approved classes`);
+  }
 
   const duplicateIds = findDuplicateIds(html);
   addCheck(result, duplicateIds.length ? 'FAIL' : 'PASS', 'formatting', 'Duplicate heading/element IDs', duplicateIds.map((item) => `${item.id} (${item.count})`).join(', ') || 'None');
+  if (restSnapshotMode) {
+    const elementIds = new Set(extractElementIds(html));
+    const requiredAnchorIds = entry.requiredAnchorIds.map((id) => String(id).replace(/^#/, ''));
+    const missingAnchorIds = requiredAnchorIds.filter((id) => !elementIds.has(id));
+    addCheck(result, missingAnchorIds.length ? 'FAIL' : 'PASS', 'links', 'Required anchor IDs', missingAnchorIds.length ? `Missing: ${missingAnchorIds.join(', ')}` : `${requiredAnchorIds.length} required anchor ID(s) present and unique`);
+  }
 
   const ga4Present = /G-D99Y7TY0LC|googletagmanager\.com\/gtag\/js/i.test(html);
   const leadEventsPresent = /lead-events\.js(?:[?"'])/i.test(html);
-  addCheck(result, ga4Present ? 'PASS' : 'FAIL', 'technical', 'GA4 marker', ga4Present ? 'Present' : 'Missing');
-  addCheck(result, leadEventsPresent ? 'PASS' : 'FAIL', 'technical', 'lead-events.js marker', leadEventsPresent ? 'Present' : 'Missing');
+  if (restSnapshotMode) {
+    addCheck(result, 'SKIPPED', 'technical', 'GA4 loading/execution', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'technical', 'lead-events.js loading/execution', REST_SNAPSHOT_SKIP_DETAIL);
+  } else {
+    addCheck(result, ga4Present ? 'PASS' : 'FAIL', 'technical', 'GA4 marker', ga4Present ? 'Present' : 'Missing');
+    addCheck(result, leadEventsPresent ? 'PASS' : 'FAIL', 'technical', 'lead-events.js marker', leadEventsPresent ? 'Present' : 'Missing');
+  }
 
-  const types = schemaTypes(html);
-  const disallowedSchema = types.filter((type) => ['review', 'aggregaterating'].includes(type.toLowerCase()));
-  addCheck(result, disallowedSchema.length ? 'FAIL' : 'PASS', 'indexing', 'Review/AggregateRating schema', disallowedSchema.join(', ') || 'None');
+  if (restSnapshotMode) {
+    addCheck(result, 'SKIPPED', 'indexing', 'Schema generated outside REST content', REST_SNAPSHOT_SKIP_DETAIL);
+  } else {
+    const types = schemaTypes(html);
+    const disallowedSchema = types.filter((type) => ['review', 'aggregaterating'].includes(type.toLowerCase()));
+    addCheck(result, disallowedSchema.length ? 'FAIL' : 'PASS', 'indexing', 'Review/AggregateRating schema', disallowedSchema.join(', ') || 'None');
+  }
 
   const unsupported = wordingFindings(text);
   addCheck(result, unsupported.length ? 'FAIL' : 'PASS', 'factual', 'Unsupported guarantee/yield wording', unsupported.join(', ') || 'None');
@@ -720,6 +845,7 @@ async function auditPage(entry, snapshot = null) {
 
 async function auditOrdinaryPage(entry, snapshot = null) {
   const snapshotMode = Boolean(snapshot);
+  const restSnapshotMode = snapshotMode && snapshot.browserRenderedSnapshot === false;
   const response = snapshotMode
     ? { ok: true, status: 0, finalUrl: snapshot.finalUrl, body: snapshot.html }
     : await fetchResource(entry.url);
@@ -729,10 +855,17 @@ async function auditOrdinaryPage(entry, snapshot = null) {
     finalUrl: redactUrl(response.finalUrl),
     httpStatus: snapshotMode ? null : response.status,
     inputMode: snapshotMode ? 'snapshot' : 'network',
+    snapshotCapability: snapshotMode
+      ? (restSnapshotMode ? REST_SNAPSHOT_CAPABILITY : BROWSER_SNAPSHOT_CAPABILITY)
+      : 'network',
     checks: [],
   };
 
-  if (snapshotMode) {
+  if (restSnapshotMode) {
+    addCheck(result, 'SKIPPED', 'technical', 'Logged-out accessibility', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'technical', 'Verification CSS absence', REST_SNAPSHOT_SKIP_DETAIL);
+    addCheck(result, 'SKIPPED', 'technical', 'Verification JavaScript absence', REST_SNAPSHOT_SKIP_DETAIL);
+  } else if (snapshotMode) {
     addCheck(result, 'SKIPPED', 'technical', 'HTTP accessibility', 'Local authenticated snapshot');
     const cssPresent = /verification-content\.css(?:[?"'])/i.test(response.body);
     const jsPresent = /verification-content\.js(?:[?"'])/i.test(response.body);
@@ -764,6 +897,10 @@ function aggregateReport(pages, ordinaryPages, snapshotManifest = '') {
       counts[page.status] = (counts[page.status] || 0) + 1;
       return counts;
     }, {}),
+    snapshotCapabilityCounts: pages.reduce((counts, page) => {
+      counts[page.snapshotCapability] = (counts[page.snapshotCapability] || 0) + 1;
+      return counts;
+    }, {}),
     pages,
     ordinaryPages,
     warnings,
@@ -793,16 +930,22 @@ function renderMarkdown(report) {
     '',
     '## Page Status',
     '',
-    '| Page | Type | HTTP | Status |',
-    '| --- | --- | ---: | --- |',
-    ...report.pages.map((page) => `| ${markdownEscape(page.pageName)} | ${markdownEscape(page.pageType)} | ${page.httpStatus || '-'} | ${markdownEscape(page.status)} |`),
+    '| Page | Type | Input capability | HTTP | Status |',
+    '| --- | --- | --- | ---: | --- |',
+    ...report.pages.map((page) => `| ${markdownEscape(page.pageName)} | ${markdownEscape(page.pageType)} | ${markdownEscape(page.snapshotCapability)} | ${page.httpStatus || '-'} | ${markdownEscape(page.status)} |`),
   ];
 
   for (const page of report.pages) {
     lines.push('', `## ${page.pageName}`, '', `- URL: ${page.url}`, `- Final URL: ${page.finalUrl || 'Unverified'}`, `- Status: **${page.status}**`, `- Sources required: ${page.requiresSources ? 'Yes' : 'No'}`);
-    if (page.inputMode === 'snapshot') lines.push('- Input: Local authenticated snapshot');
-    if (page.metadata.title !== undefined) {
+    if (page.snapshotCapability === REST_SNAPSHOT_CAPABILITY) {
+      lines.push('- Input: REST-derived snapshot', '- Browser QA: Pending; this input cannot produce a browser-ready verdict');
+    } else if (page.inputMode === 'snapshot') {
+      lines.push('- Input: Local authenticated browser-rendered snapshot');
+    }
+    if (page.snapshotCapability !== REST_SNAPSHOT_CAPABILITY && page.metadata.title !== undefined) {
       lines.push(`- Title: ${page.metadata.title || 'Missing'}`, `- H1: ${page.metadata.h1Texts?.join(' | ') || 'Missing'}`, `- Robots: ${page.metadata.robots || 'Missing'}`, `- Canonical: ${page.metadata.canonical || 'Missing'}`);
+    } else if (page.snapshotCapability === REST_SNAPSHOT_CAPABILITY) {
+      lines.push(`- Supplied robots: ${page.metadata.robots || 'Not supplied'}`, `- Supplied canonical: ${page.metadata.canonical || 'Not supplied'}`);
     }
     if (page.classifications.length) lines.push(`- Classifications: ${page.classifications.join(', ')}`);
     if (page.sourceIds.length) lines.push(`- Source IDs: ${page.sourceIds.join(', ')}`);
@@ -827,7 +970,7 @@ function renderMarkdown(report) {
     lines.push('', '## Report Warnings', '', ...report.warnings.map((warning) => `- ${warning}`));
   }
 
-  lines.push('', '## Safety Notes', '', '- This report is read-only and submits no forms.', '- Query strings and fragments are redacted from reported page/source URLs.', '- Local snapshot file paths are never included in reports.', '- Never commit authenticated HTML snapshots or snapshot manifests containing private filenames.', '- Keep pages Draft/noindex until every factual, source, link, formatting and indexing check is resolved.', '- Authenticated previews are reported as unverifiable unless supplied as local snapshots; the script does not accept or store WordPress credentials.');
+  lines.push('', '## Safety Notes', '', '- This report is read-only and submits no forms.', '- Query strings and fragments are redacted from reported page/source URLs.', '- Local snapshot file paths are never included in reports.', '- Never commit authenticated HTML snapshots or snapshot manifests containing private filenames.', '- A REST-derived snapshot validates content structure only and never establishes browser readiness.', '- Keep pages Draft/noindex until every factual, source, link, formatting and indexing check is resolved.', '- Authenticated previews are reported as unverifiable unless supplied as local snapshots; the script does not accept or store WordPress credentials.');
   return lines.join('\n');
 }
 
@@ -839,7 +982,10 @@ function renderConsole(report) {
   ];
 
   for (const page of report.pages) {
-    lines.push(`${page.status}: ${page.pageName} (${page.inputMode === 'snapshot' ? 'local snapshot' : (page.httpStatus || 'no HTTP status')})`);
+    const input = page.snapshotCapability === REST_SNAPSHOT_CAPABILITY
+      ? 'REST-derived snapshot; browser QA pending'
+      : (page.inputMode === 'snapshot' ? 'browser-rendered snapshot' : (page.httpStatus || 'no HTTP status'));
+    lines.push(`${page.status}: ${page.pageName} (${input})`);
     for (const check of page.checks.filter((item) => item.severity !== 'PASS')) {
       lines.push(`  ${check.severity} ${check.label}: ${check.detail}`);
     }

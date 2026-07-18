@@ -4,7 +4,7 @@
 
 `scripts/check-malendo-verification-pages.mjs` is a read-only QA tool for Malendo developer and project verification Pages. Run it when a public URL or an authenticated-preview URL is available and before asking an editor to approve indexing.
 
-The tool reads local HTML snapshots or fetches HTML and linked resources. It does not log in, submit forms, change WordPress, write to the database, or mutate production.
+The tool reads local HTML snapshots or fetches HTML and linked resources. Snapshots may be complete browser-rendered documents or limited REST-derived content fragments. It does not log in, submit forms, change WordPress, write to the database, or mutate production.
 
 ## Requirements
 
@@ -79,7 +79,10 @@ The preferred root format has `pages` and optional `ordinaryPages` arrays:
         "/request-phuket-project-check/#compare-projects",
         "/request-phuket-project-check/#send-documents"
       ],
-      "requiredSourceIds": ["[S01]", "[S02]"]
+      "requiredSourceIds": ["[S01]", "[S02]"],
+      "requiredTexts": ["How this project check works"],
+      "requiredAnchorIds": ["sources", "buyer-questions"],
+      "requiredCtaLabels": ["Request a Project Check"]
     }
   ],
   "ordinaryPages": [
@@ -108,8 +111,11 @@ A root JSON array of Page entries is also accepted, but it cannot configure ordi
 | `requiredInternalLinks` | Internal paths or absolute URLs that must render and be accessible. |
 | `requiredCtaLinks` | Approved CTA destinations that must render. |
 | `requiredSourceIds` | Source identifiers that must appear inline and in the source table. |
+| `requiredTexts` | Optional exact text fragments that a REST-derived content snapshot must contain. |
+| `requiredAnchorIds` | Optional element IDs that a REST-derived content snapshot must contain exactly once. A leading `#` is accepted. |
+| `requiredCtaLabels` | Optional exact visible CTA labels that a REST-derived content snapshot must contain. |
 
-`requiredInternalLinks`, `requiredCtaLinks`, and `requiredSourceIds` default to empty arrays. Configure them explicitly so the report can enforce the editorial brief.
+All `required*` arrays default to empty. Configure them explicitly so the report can enforce the editorial brief. `requiredTexts`, `requiredAnchorIds`, and `requiredCtaLabels` are especially useful when Cloud supplies a REST-derived fragment that has no browser-generated title or H1.
 
 ### Optional source requirements
 
@@ -131,36 +137,93 @@ Add at least one unrelated normal Page to `ordinaryPages`. The checker confirms 
 
 ## Local authenticated snapshots
 
-Use snapshots when a WordPress Draft or preview requires an authenticated browser session. Export the fully rendered HTML locally, then create a private JSON mapping next to a private snapshots directory:
+Use snapshots when a WordPress Draft or preview requires an authenticated browser session. The snapshot mapping must identify whether each file is a complete browser-rendered document or a REST-derived content fragment.
+
+### Browser-rendered snapshots
+
+Export the fully rendered HTML from an authenticated browser, then create a private JSON mapping next to a private snapshots directory:
 
 ```json
 {
   "https://malendo-property.com/project-check-methodology-phuket/": {
     "htmlFile": "private-snapshots/methodology.html",
-    "finalUrl": "https://malendo-property.com/project-check-methodology-phuket/"
+    "finalUrl": "https://malendo-property.com/project-check-methodology-phuket/",
+    "browserRenderedSnapshot": true
   },
   "https://malendo-property.com/request-phuket-project-check/": {
     "htmlFile": "private-snapshots/request.html",
-    "finalUrl": "https://malendo-property.com/request-phuket-project-check/"
+    "finalUrl": "https://malendo-property.com/request-phuket-project-check/",
+    "browserRenderedSnapshot": true
   }
 }
 ```
 
-Snapshot keys must be absolute HTTP(S) Page URLs. `htmlFile` must be a relative path inside the snapshot manifest directory; absolute paths and `..` traversal are rejected. `finalUrl` must be the public URL represented by the rendered HTML.
+For backward compatibility with mappings created for PR #38, omitting `browserRenderedSnapshot` means `true`. New mappings should set it explicitly. When supplied, it must be a JSON boolean rather than the strings `"true"` or `"false"`.
+
+The complete browser-snapshot checks remain unchanged: metadata, full-document H1, robots, canonical, wrapper, last-checked block, disclaimer, classifications, source requirements, CTA/internal links, duplicate IDs, raw shortcodes, asset markers, schema, risky wording, old domains, and table classes all run.
+
+### REST-derived snapshots
+
+Cloud-generated files based on WordPress REST `content.rendered` must use `browserRenderedSnapshot: false`:
+
+```json
+{
+  "https://malendo-property.com/project-check-methodology-phuket/": {
+    "htmlFile": "private-snapshots/methodology-rest.html",
+    "finalUrl": "https://malendo-property.com/project-check-methodology-phuket/",
+    "browserRenderedSnapshot": false,
+    "robots": "noindex,nofollow",
+    "canonical": "https://malendo-property.com/project-check-methodology-phuket/"
+  }
+}
+```
+
+`robots` and `canonical` are optional supplied metadata. The checker validates them when present and reports those checks as skipped when they are absent. It does not infer browser head metadata from a REST fragment.
+
+For REST-derived snapshots, the checker runs only content-level checks that the supplied fragment can support:
+
+- required text and section/anchor presence configured in the Page manifest;
+- last-checked block, disclaimer, verification classifications, and non-empty verification-box content;
+- CTA labels, approved CTA href values, and required internal links;
+- required anchor IDs and duplicate IDs within the supplied fragment;
+- raw `[malendo_...]` shortcode leakage;
+- source requirements, including source IDs, table, and link presence;
+- risky guarantee/yield wording and old-domain strings;
+- unresolved Contact Form 7 shortcode or placeholder markers;
+- explicitly supplied robots and canonical metadata.
+
+These browser-dependent checks report `SKIPPED` with the detail `REST-derived snapshot`:
+
+- full-document and theme-generated H1;
+- title and meta description from the browser document head;
+- visible WPBakery markup outside the supplied fragment;
+- header, footer, sidebar, and complete browser DOM;
+- verification CSS/JavaScript, GA4, and `lead-events.js` loading or execution;
+- responsive rendering and visual TOC behavior;
+- schema generated outside REST content;
+- logged-out Page, source, CTA, and internal-link accessibility.
+
+A clean REST-derived result uses this deliberately limited verdict:
+
+```text
+CONTENT STRUCTURALLY READY — BROWSER QA PENDING
+```
+
+It can never return `Ready for editorial approval`. Export browser-rendered HTML and run full snapshot QA before employee handoff or publication.
+
+### Mapping and privacy rules
+
+Snapshot keys must be absolute HTTP(S) Page URLs. `htmlFile` must be a relative path inside the snapshot manifest directory; absolute paths and `..` traversal are rejected. `finalUrl` must be the public URL represented by the supplied content.
 
 The checker matches a snapshot by the Page `url`, falling back to `expectedCanonical`. Pages without a matching snapshot continue through the existing network mode. This permits a mixed report without changing network behavior.
 
-For a snapshot Page, all HTML checks still run: metadata, H1, robots, canonical, wrapper, last-checked block, disclaimer, classifications, source requirements, rendered CTA/internal links, duplicate IDs, raw shortcodes, asset markers, schema, risky wording, and old domains.
-
-The checker does not make Page, source, CTA, or required internal-link requests for a snapshot Page. These accessibility checks report:
+The checker does not make Page, source, CTA, or required internal-link requests for any snapshot Page. Browser-rendered snapshots report:
 
 ```text
 SKIPPED: Local authenticated snapshot
 ```
 
 Presence in exported HTML is not proof that a destination works. Complete accessibility checks after the Page has an owner-approved public URL.
-
-### Snapshot privacy
 
 - Never commit exported authenticated HTML or a private snapshot manifest.
 - Never include cookies, authorization headers, passwords, preview nonces, form values, or personal data.
@@ -214,7 +277,7 @@ For every verification Page, the script checks:
 22. Absence of Review and AggregateRating schema.
 23. Conservative unsupported guarantee/yield wording patterns.
 
-In snapshot mode, all HTTP accessibility checks are `SKIPPED`; every applicable HTML check above remains active.
+In browser-rendered snapshot mode, all HTTP accessibility checks are `SKIPPED` and every applicable HTML check above remains active. REST-derived snapshot mode uses the narrower capability list documented above and marks browser-only checks `SKIPPED — REST-derived snapshot`.
 
 The tool also checks that verification CSS/JS are absent from configured ordinary Pages.
 
@@ -229,6 +292,7 @@ This is not a content failure. Open the preview in an authenticated browser and 
 | Status | Meaning |
 | --- | --- |
 | `Ready for editorial approval` | No failures or warnings were found. This is not permission to index automatically. |
+| `CONTENT STRUCTURALLY READY — BROWSER QA PENDING` | A REST-derived snapshot passed the available content checks. Browser-rendered QA is still mandatory, so this is not a publication or editorial-readiness verdict. |
 | `Needs factual correction` | Unsafe domain or unsupported guarantee/yield wording was found. |
 | `Needs source correction` | Source identifiers, source table, source links, or source accessibility failed. |
 | `Missing CTA/internal links` | Required or approved CTA/internal links are missing or broken. |
@@ -237,7 +301,7 @@ This is not a content failure. Open the preview in an authenticated browser and 
 | `Unverifiable without authenticated preview` | Public HTML was unavailable without authentication. |
 | `Keep Draft/noindex` | Only warnings remain and human review is still required. |
 
-Individual checks may report `SKIPPED` when source evidence is explicitly not required for that page type. A skipped source check does not change the page status or exit code.
+Individual checks may report `SKIPPED` when source evidence is explicitly not required for that page type or when the input capability cannot support the check. A skipped check does not change the page status or exit code.
 
 The primary status follows the highest-priority failed category. The per-check table remains the source of truth when several categories have problems.
 
@@ -273,13 +337,14 @@ If a Page neutrally quotes such wording as a developer claim or warning, an edit
 1. Keep the WordPress Page as Draft.
 2. Set Yoast to `noindex,nofollow` before exposing a public pre-approval URL.
 3. Prepare a local manifest with exact expected metadata, links, CTA destinations, and source IDs.
-4. For an authenticated Draft, export rendered HTML and prepare a private snapshot mapping outside Git.
-5. Run the Markdown report in network or snapshot mode.
-6. Correct factual and source failures first.
-7. Correct links, formatting, robots, and canonical issues.
-8. Rerun until no failures remain.
-9. Complete manual legal/editorial review and browser QA.
-10. Obtain owner/editor approval before changing indexation.
+4. Cloud may first export a REST-derived fragment with `browserRenderedSnapshot: false` for content preflight.
+5. For an authenticated Draft, an employee must later export fully rendered browser HTML with `browserRenderedSnapshot: true`.
+6. Run the Markdown report in network or snapshot mode.
+7. Correct factual and source failures first.
+8. Correct links, formatting, robots, and canonical issues.
+9. Rerun until no failures remain.
+10. Complete manual legal/editorial review and browser QA.
+11. Obtain owner/editor approval before changing indexation.
 
 ## Manual checks still required
 
