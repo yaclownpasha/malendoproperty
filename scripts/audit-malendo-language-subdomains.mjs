@@ -1,11 +1,22 @@
 #!/usr/bin/env node
 
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { gzipSync, gunzipSync } from 'node:zlib';
+
 const BASE_URL = 'https://malendo-property.com';
 const ROOT_DOMAIN = 'malendo-property.com';
-const TIMEOUT_MS = 10000;
+const TIMEOUT_MS = 12000;
 const DISCOVERY_PATHS = ['/', '/contact/', '/properties/'];
-const SAMPLE_LIMIT = DISCOVERY_PATHS.length;
-const HOST_CONCURRENCY = 12;
+const HOST_CONCURRENCY = 2;
+const NETWORK_CONCURRENCY = 3;
+const MAX_ATTEMPTS = 3;
+const MAX_REDIRECTS = 6;
+const PER_HOST_REQUEST_BUDGET = 8;
+const CACHE_VERSION = 2;
+const DEFAULT_CACHE_TTL_HOURS = 12;
+const CACHE_FLUSH_INTERVAL = 10;
 const CURRENT_YEAR = new Date().getFullYear();
 const LEGACY_PATTERNS = [
   { label: 'legacy email', pattern: /info@malendo\.property/gi },
@@ -29,6 +40,30 @@ const ENGLISH_MARKERS = [
 const args = process.argv.slice(2);
 const mode = args.includes('--json') ? 'json' : args.includes('--markdown') ? 'markdown' : 'console';
 const fetchCache = new Map();
+const persistentCache = new Map();
+const hostRequestCounts = new Map();
+const networkWaiters = [];
+let activeNetworkRequests = 0;
+let cacheDirtyEntries = 0;
+let cacheWriteChain = Promise.resolve();
+const cacheEnabled = !args.includes('--no-cache');
+const refreshCache = args.includes('--refresh');
+
+function argumentValue(name, fallback = '') {
+  const index = args.indexOf(name);
+  return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
+}
+
+const configuredCachePath = argumentValue('--cache');
+const cachePath = configuredCachePath
+  ? path.resolve(configuredCachePath)
+  : path.join(os.tmpdir(), 'malendo-language-subdomain-audit-cache-v2.json');
+const cacheTtlHours = Number(argumentValue('--cache-ttl-hours', String(DEFAULT_CACHE_TTL_HOURS)));
+const cacheTtlMs = Number.isFinite(cacheTtlHours) && cacheTtlHours > 0
+  ? cacheTtlHours * 60 * 60 * 1000
+  : DEFAULT_CACHE_TTL_HOURS * 60 * 60 * 1000;
+const cacheStats = { enabled: cacheEnabled, hits: 0, misses: 0, writes: 0, ignoredExpired: 0, ignoredTransient: 0 };
+const transportStats = { networkAttempts: 0, retries: 0, retryAfterHonored: 0, budgetExhausted: 0 };
 
 function uniq(values) {
   return [...new Set(values.filter(Boolean))];
@@ -179,67 +214,269 @@ function hostRoot(urlOrHost) {
   return `https://${host}`;
 }
 
-async function fetchResource(url, accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7') {
-  const cacheKey = `${accept}|${url}`;
-  if (fetchCache.has(cacheKey)) return fetchCache.get(cacheKey);
-  const promise = (async () => {
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function deterministicNumber(value) {
+  let hash = 2166136261;
+  for (const character of String(value)) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+async function withNetworkSlot(task) {
+  if (activeNetworkRequests >= NETWORK_CONCURRENCY) {
+    await new Promise((resolve) => networkWaiters.push(resolve));
+  }
+  activeNetworkRequests += 1;
+  try {
+    return await task();
+  } finally {
+    activeNetworkRequests -= 1;
+    networkWaiters.shift()?.();
+  }
+}
+
+function claimHostBudget(url) {
+  const host = safeHost(url) || 'unknown';
+  const limit = host === ROOT_DOMAIN || host === `www.${ROOT_DOMAIN}`
+    ? PER_HOST_REQUEST_BUDGET * 2
+    : PER_HOST_REQUEST_BUDGET;
+  const used = hostRequestCounts.get(host) ?? 0;
+  if (used >= limit) {
+    transportStats.budgetExhausted += 1;
+    return false;
+  }
+  hostRequestCounts.set(host, used + 1);
+  return true;
+}
+
+function retryAfterMilliseconds(value) {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.min(Math.max(date - Date.now(), 0), 30000) : 0;
+}
+
+function retryableStatus(status) {
+  return status === 429 || status === 408 || status === 425 || status === 502 || status === 503 || status === 504;
+}
+
+function transportFailure(type, detail, status = 0, retryAfterMs = 0) {
+  return { type, detail, status, retryAfterMs };
+}
+
+function serializeCachedResponse(response) {
+  const { body, ...metadata } = response;
+  return {
+    ...metadata,
+    bodyGzip: gzipSync(Buffer.from(body ?? '', 'utf8')).toString('base64'),
+  };
+}
+
+function deserializeCachedResponse(value) {
+  const { bodyGzip, ...metadata } = value;
+  return {
+    ...metadata,
+    body: bodyGzip ? gunzipSync(Buffer.from(bodyGzip, 'base64')).toString('utf8') : '',
+    fromCache: true,
+  };
+}
+
+function cacheableResponse(response) {
+  return !response.transportFailure && (response.status === 200 || response.status === 404 || response.status === 410);
+}
+
+async function loadPersistentCache() {
+  if (!cacheEnabled || refreshCache) return;
+  try {
+    const parsed = JSON.parse(await fs.readFile(cachePath, 'utf8'));
+    if (parsed.version !== CACHE_VERSION || !Array.isArray(parsed.entries)) return;
+    for (const [key, entry] of parsed.entries) persistentCache.set(key, entry);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') cacheStats.ignoredTransient += 1;
+  }
+}
+
+function cachedResponse(cacheKey) {
+  if (!cacheEnabled || refreshCache) return null;
+  const entry = persistentCache.get(cacheKey);
+  if (!entry) {
+    cacheStats.misses += 1;
+    return null;
+  }
+  if (!entry.savedAt || Date.now() - entry.savedAt > cacheTtlMs) {
+    cacheStats.ignoredExpired += 1;
+    persistentCache.delete(cacheKey);
+    return null;
+  }
+  try {
+    cacheStats.hits += 1;
+    return deserializeCachedResponse(entry.response);
+  } catch {
+    cacheStats.ignoredTransient += 1;
+    persistentCache.delete(cacheKey);
+    return null;
+  }
+}
+
+function scheduleCacheWrite(force = false) {
+  if (!cacheEnabled || (!force && cacheDirtyEntries < CACHE_FLUSH_INTERVAL)) return cacheWriteChain;
+  cacheDirtyEntries = 0;
+  cacheWriteChain = cacheWriteChain.then(async () => {
+    await fs.mkdir(path.dirname(cachePath), { recursive: true });
+    const payload = JSON.stringify({
+      version: CACHE_VERSION,
+      updatedAt: new Date().toISOString(),
+      entries: [...persistentCache.entries()],
+    });
+    const temporaryPath = `${cachePath}.${process.pid}.tmp`;
+    await fs.writeFile(temporaryPath, payload, 'utf8');
+    await fs.rename(temporaryPath, cachePath);
+    cacheStats.writes += 1;
+  }).catch(() => {
+    cacheStats.ignoredTransient += 1;
+  });
+  return cacheWriteChain;
+}
+
+function storeCachedResponse(cacheKey, response) {
+  if (!cacheEnabled || !cacheableResponse(response)) return;
+  try {
+    persistentCache.set(cacheKey, { savedAt: Date.now(), response: serializeCachedResponse(response) });
+    cacheDirtyEntries += 1;
+    scheduleCacheWrite();
+  } catch {
+    cacheStats.ignoredTransient += 1;
+  }
+}
+
+async function requestAttempt(url, accept) {
+  if (!claimHostBudget(url)) {
+    return { response: null, failure: transportFailure('budget-exhausted', `Per-host request budget of ${PER_HOST_REQUEST_BUDGET} exhausted`) };
+  }
+  transportStats.networkAttempts += 1;
+  return withNetworkSlot(async () => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-    const redirectChain = [];
-    let currentUrl = url;
     try {
-      for (let hop = 0; hop <= 6; hop += 1) {
-        const response = await fetch(currentUrl, {
-          redirect: 'manual',
-          headers: {
-            accept,
-            'user-agent': 'MalendoLanguageSubdomainAudit/1.0 (+https://malendo-property.com)',
-            'cache-control': 'no-cache',
-          },
-          signal: controller.signal,
-        });
-        const location = response.headers.get('location');
-        if (response.status >= 300 && response.status < 400 && location) {
-          const nextUrl = new URL(location, currentUrl).href;
-          redirectChain.push({ status: response.status, url: currentUrl, location: nextUrl });
-          currentUrl = nextUrl;
-          continue;
-        }
-        return {
-          requestedUrl: url,
-          finalUrl: currentUrl,
-          status: response.status,
-          ok: response.ok,
-          contentType: response.headers.get('content-type') ?? '',
-          body: await response.text(),
-          redirectChain,
-          error: '',
-        };
-      }
-      return {
-        requestedUrl: url,
-        finalUrl: currentUrl,
-        status: 0,
-        ok: false,
-        contentType: '',
-        body: '',
-        redirectChain,
-        error: 'More than 6 redirects',
-      };
+      const response = await fetch(url, {
+        redirect: 'manual',
+        headers: {
+          accept,
+          'user-agent': 'MalendoLanguageSubdomainAudit/2.0 (+https://malendo-property.com)',
+          'cache-control': 'no-cache',
+        },
+        signal: controller.signal,
+      });
+      return { response, failure: null };
     } catch (error) {
-      return {
-        requestedUrl: url,
-        finalUrl: '',
-        status: 0,
-        ok: false,
-        contentType: '',
-        body: '',
-        redirectChain,
-        error: error?.name === 'AbortError' ? `Timeout after ${TIMEOUT_MS}ms` : String(error?.message ?? error),
-      };
+      const detail = error?.name === 'AbortError' ? `Timeout after ${TIMEOUT_MS}ms` : String(error?.message ?? error);
+      return { response: null, failure: transportFailure(error?.name === 'AbortError' ? 'timeout' : 'network-error', detail) };
     } finally {
       clearTimeout(timer);
     }
+  });
+}
+
+async function fetchResource(url, accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7') {
+  const cacheKey = `${accept}|${url}`;
+  if (fetchCache.has(cacheKey)) return fetchCache.get(cacheKey);
+  const saved = cachedResponse(cacheKey);
+  if (saved) {
+    const promise = Promise.resolve(saved);
+    fetchCache.set(cacheKey, promise);
+    return promise;
+  }
+  const promise = (async () => {
+    const redirectChain = [];
+    let currentUrl = url;
+    let totalAttempts = 0;
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+      let attemptResult = null;
+      let lastFailure = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        totalAttempts += 1;
+        attemptResult = await requestAttempt(currentUrl, accept);
+        if (attemptResult.failure?.type === 'budget-exhausted') {
+          lastFailure = attemptResult.failure;
+          break;
+        }
+        if (attemptResult.failure) {
+          lastFailure = attemptResult.failure;
+        } else if (!retryableStatus(attemptResult.response.status)) {
+          lastFailure = null;
+          break;
+        } else {
+          const retryAfterMs = retryAfterMilliseconds(attemptResult.response.headers.get('retry-after'));
+          lastFailure = transportFailure('http-retryable', `HTTP ${attemptResult.response.status}`, attemptResult.response.status, retryAfterMs);
+          await attemptResult.response.body?.cancel();
+        }
+        if (attempt < MAX_ATTEMPTS) {
+          transportStats.retries += 1;
+          const retryAfterMs = lastFailure?.retryAfterMs ?? 0;
+          if (retryAfterMs) transportStats.retryAfterHonored += 1;
+          await wait(retryAfterMs || Math.min(1000 * (2 ** (attempt - 1)), 8000));
+        }
+      }
+
+      if (lastFailure || !attemptResult?.response) {
+        return {
+          requestedUrl: url,
+          finalUrl: currentUrl,
+          status: lastFailure?.status ?? 0,
+          ok: false,
+          contentType: '',
+          body: '',
+          redirectChain,
+          attempts: totalAttempts,
+          fromCache: false,
+          transportFailure: lastFailure ?? transportFailure('network-error', 'Request did not produce a response'),
+          error: lastFailure?.detail ?? 'Request did not produce a response',
+        };
+      }
+
+      const response = attemptResult.response;
+      const location = response.headers.get('location');
+      if (response.status >= 300 && response.status < 400 && location) {
+        const nextUrl = new URL(location, currentUrl).href;
+        redirectChain.push({ status: response.status, url: currentUrl, location: nextUrl });
+        currentUrl = nextUrl;
+        continue;
+      }
+      const result = {
+        requestedUrl: url,
+        finalUrl: currentUrl,
+        status: response.status,
+        ok: response.ok,
+        contentType: response.headers.get('content-type') ?? '',
+        body: await response.text(),
+        redirectChain,
+        attempts: totalAttempts,
+        fromCache: false,
+        transportFailure: null,
+        error: '',
+      };
+      storeCachedResponse(cacheKey, result);
+      return result;
+    }
+    return {
+      requestedUrl: url,
+      finalUrl: currentUrl,
+      status: 0,
+      ok: false,
+      contentType: '',
+      body: '',
+      redirectChain,
+      attempts: totalAttempts,
+      fromCache: false,
+      transportFailure: transportFailure('redirect-limit', `More than ${MAX_REDIRECTS} redirects`),
+      error: `More than ${MAX_REDIRECTS} redirects`,
+    };
   })();
   fetchCache.set(cacheKey, promise);
   return promise;
@@ -369,6 +606,9 @@ function inspectPage(resource, expectedHost, baseComparison) {
     finalUrl: resource.finalUrl,
     status: resource.status,
     error: resource.error,
+    attempts: resource.attempts ?? 0,
+    fromCache: Boolean(resource.fromCache),
+    transportFailure: resource.transportFailure ?? null,
     redirectChain: resource.redirectChain ?? [],
     redirectCount: resource.redirectChain?.length ?? 0,
     redirected: Boolean(resource.redirectChain?.length),
@@ -481,13 +721,27 @@ function pathsForHost(host, discovery) {
       }
     }
   }
-  return uniq(paths).slice(0, SAMPLE_LIMIT);
+  const discoveredPaths = uniq(paths).sort();
+  const secondaryPaths = discoveredPaths.filter((item) => item !== '/');
+  const fallbackPaths = DISCOVERY_PATHS.filter((item) => item !== '/');
+  const candidates = secondaryPaths.length ? secondaryPaths : fallbackPaths;
+  const representative = candidates[deterministicNumber(host) % candidates.length];
+  return {
+    discoveredPaths,
+    sampledPaths: uniq(['/', representative]),
+  };
 }
 
 async function sitemapForHost(host, auditedUrls) {
   const candidates = [`https://${host}/sitemap_index.xml`, `https://${host}/wp-sitemap.xml`];
-  const responses = await Promise.all(candidates.map((url) => fetchResource(url, 'application/xml,text/xml,*/*;q=0.8')));
-  for (let index = 0; index < candidates.length; index += 1) {
+  const responses = [];
+  for (const candidate of candidates) {
+    const response = await fetchResource(candidate, 'application/xml,text/xml,*/*;q=0.8');
+    responses.push(response);
+    if (response.status === 200 && /<(?:sitemapindex|urlset)\b/i.test(response.body)) break;
+    if (response.transportFailure) break;
+  }
+  for (let index = 0; index < responses.length; index += 1) {
     const url = candidates[index];
     const response = responses[index];
     if (response.status === 200 && /<(?:sitemapindex|urlset)\b/i.test(response.body)) {
@@ -495,10 +749,11 @@ async function sitemapForHost(host, auditedUrls) {
       let pageLocations = response.body.match(/<urlset\b/i) ? locations : [];
       const pageSitemaps = locations
         .filter((location) => safeHost(location) === host && /(?:page-sitemap|wp-sitemap-posts-page)/i.test(location))
-        .slice(0, 2);
+        .slice(0, 1);
       if (pageSitemaps.length) {
         const childResponses = await Promise.all(pageSitemaps.map((location) => fetchResource(location, 'application/xml,text/xml,*/*;q=0.8')));
         pageLocations = uniq(childResponses.flatMap((child) => child.status === 200 ? xmlLocations(child.body) : []));
+        responses.push(...childResponses);
       }
       return {
         requestedUrl: url,
@@ -515,10 +770,33 @@ async function sitemapForHost(host, auditedUrls) {
           included: pageLocations.some((location) => sameUrl(location, url)),
           status: pageLocations.length ? 'checked' : 'unknown',
         })),
+        transportFailures: responses.filter((item) => item.transportFailure).map((item) => ({
+          url: item.requestedUrl,
+          status: item.status,
+          attempts: item.attempts,
+          ...item.transportFailure,
+        })),
       };
     }
   }
-  return { requestedUrl: candidates[0], finalUrl: '', status: 0, type: 'none', locationCount: 0, ownHostLocations: 0, crossHostLocations: [], checkedPageSitemaps: [], pageLocationCount: 0, pageChecks: auditedUrls.map((url) => ({ url, included: false, status: 'unknown' })) };
+  return {
+    requestedUrl: candidates[0],
+    finalUrl: responses.at(-1)?.finalUrl ?? '',
+    status: responses.at(-1)?.status ?? 0,
+    type: 'none',
+    locationCount: 0,
+    ownHostLocations: 0,
+    crossHostLocations: [],
+    checkedPageSitemaps: [],
+    pageLocationCount: 0,
+    pageChecks: auditedUrls.map((url) => ({ url, included: false, status: 'unknown' })),
+    transportFailures: responses.filter((item) => item.transportFailure).map((item) => ({
+      url: item.requestedUrl,
+      status: item.status,
+      attempts: item.attempts,
+      ...item.transportFailure,
+    })),
+  };
 }
 
 function reciprocityForPage(page, sourceUrl) {
@@ -532,14 +810,14 @@ function reciprocityForPage(page, sourceUrl) {
 
 function classifyHost(hostResult) {
   const successful = hostResult.pages.filter((page) => page.status === 200 && page.remainedOnHost);
-  const transportUncertain = hostResult.pages.some((page) => page.status === 0 || [403, 408, 425, 429].includes(page.status));
+  const transportUncertain = hostResult.transportFailures.length > 0;
   const allDefinitivelyUnavailable = hostResult.pages.every((page) =>
-    [404, 410].includes(page.status) || (page.redirected && !page.remainedOnHost));
+    !page.transportFailure && ([404, 410].includes(page.status) || (page.redirected && !page.remainedOnHost)));
   const severeQuality = successful.some((page) =>
     page.malformed.length || page.legacy.length || page.brokenContactLinks.length ||
     (page.placeholderMarkers.length && page.indexable) || page.contentSimilarity >= 0.9 ||
     (page.englishMarkers.length >= 3 && !hostResult.languages.some((language) => language.startsWith('en')))) ||
-    hostResult.findings?.some((finding) => finding.area === 'duplicate content' && finding.severity === 'high');
+    hostResult.seoFindings?.some((finding) => finding.area === 'duplicate content' && finding.severity === 'high');
   const indexingConflict = successful.some((page) => !page.indexable || !page.canonicalSelf || (page.canonicalHost && page.canonicalHost !== hostResult.host));
   const technicalGaps = successful.some((page) =>
     !page.title || !page.metaDescription || page.h1Count !== 1 || !page.xDefault || !page.reciprocity.reciprocal);
@@ -553,41 +831,62 @@ function classifyHost(hostResult) {
 }
 
 function findingsForHost(hostResult) {
-  const findings = [];
-  const add = (area, severity, pageUrl, detail) => findings.push({ area, severity, pageUrl, detail });
+  const seoFindings = [];
+  const transportFailures = [...(hostResult.sitemap.transportFailures ?? [])];
+  const addSeo = (area, severity, pageUrl, detail) => seoFindings.push({ area, severity, pageUrl, detail });
+  const addTransport = (page) => transportFailures.push({
+    url: page.requestedUrl,
+    finalUrl: page.finalUrl,
+    status: page.status,
+    attempts: page.attempts,
+    ...(page.transportFailure ?? transportFailure('http-error', page.error || `HTTP ${page.status}`, page.status)),
+  });
   for (const page of hostResult.pages) {
-    if (page.status !== 200) add('HTTP', 'high', page.requestedUrl, page.error || `HTTP ${page.status}`);
-    if (page.status === 200 && !page.remainedOnHost) add('redirect', 'high', page.requestedUrl, `Redirects off-host to ${page.finalUrl}`);
-    if (page.redirectCount > 1) add('redirect', 'medium', page.requestedUrl, `Redirect chain has ${page.redirectCount} hops`);
-    if (!page.title) add('title', 'medium', page.requestedUrl, 'Missing title');
-    if (!page.metaDescription) add('meta', 'medium', page.requestedUrl, 'Missing meta description');
-    if (page.h1Count !== 1) add('H1', 'medium', page.requestedUrl, `Expected one H1; found ${page.h1Count}`);
-    if (!page.robots) add('robots', 'low', page.requestedUrl, 'No robots meta; defaults to indexable');
-    if (!page.canonical) add('canonical', 'high', page.requestedUrl, 'Missing canonical');
-    else if (page.wrongLanguageCanonical) add('canonical', 'high', page.requestedUrl, `Canonical points to another language host: ${page.canonical}`);
-    else if (!page.canonicalSelf) add('canonical', 'high', page.requestedUrl, `Canonical is not the audited URL: ${page.canonical}`);
-    if (!page.xDefault) add('hreflang', 'medium', page.requestedUrl, 'Missing x-default alternate');
-    if (!page.reciprocity.reciprocal) add('hreflang', 'high', page.requestedUrl, 'No reciprocal English/base alternate found');
-    if (page.contentSimilarity >= 0.9) add('duplicate content', 'high', page.requestedUrl, `English baseline similarity ${page.contentSimilarity}`);
-    else if (page.contentSimilarity >= 0.7) add('duplicate content', 'medium', page.requestedUrl, `English baseline similarity ${page.contentSimilarity}`);
-    if (page.englishMarkers.length >= 3 && !hostResult.languages.some((language) => language.startsWith('en'))) {
-      add('translation', 'high', page.requestedUrl, `English markers remain: ${page.englishMarkers.join(', ')}`);
+    if (page.transportFailure || page.status === 0 || [403, 408, 425, 429, 502, 503, 504].includes(page.status)) {
+      addTransport(page);
+      page.sitemapInclusion = { url: page.requestedUrl, included: false, status: 'unknown' };
+      continue;
     }
-    for (const issue of page.malformed) add('translation', 'high', page.requestedUrl, `${issue.label}: ${issue.examples.join(', ')}`);
-    for (const issue of page.legacy) add('legacy data', 'high', page.requestedUrl, `${issue.label}: ${issue.examples.join(', ')}`);
-    for (const link of page.brokenContactLinks) add('contact link', 'high', page.requestedUrl, `${link.issue}: ${link.href}`);
-    for (const copyright of page.staleCopyright) add('copyright', 'medium', page.requestedUrl, `Stale year ${copyright.year}: ${copyright.text}`);
-    if (page.placeholderMarkers.length && page.indexable) add('placeholder', 'high', page.requestedUrl, `Indexable placeholder markers: ${page.placeholderMarkers.join(', ')}`);
+    if (page.status !== 200) {
+      addSeo('HTTP', 'high', page.requestedUrl, `HTTP ${page.status}`);
+      page.sitemapInclusion = { url: page.requestedUrl, included: false, status: 'unknown' };
+      continue;
+    }
+    if (!page.remainedOnHost) addSeo('redirect', 'high', page.requestedUrl, `Redirects off-host to ${page.finalUrl}`);
+    if (page.redirectCount > 1) addSeo('redirect', 'medium', page.requestedUrl, `Redirect chain has ${page.redirectCount} hops`);
+    if (!page.title) addSeo('title', 'medium', page.requestedUrl, 'Missing title');
+    if (!page.metaDescription) addSeo('meta', 'medium', page.requestedUrl, 'Missing meta description');
+    if (page.h1Count !== 1) addSeo('H1', 'medium', page.requestedUrl, `Expected one H1; found ${page.h1Count}`);
+    if (!page.robots) addSeo('robots', 'low', page.requestedUrl, 'No robots meta; defaults to indexable');
+    if (!page.canonical) addSeo('canonical', 'high', page.requestedUrl, 'Missing canonical');
+    else if (page.wrongLanguageCanonical) addSeo('canonical', 'high', page.requestedUrl, `Canonical points to another language host: ${page.canonical}`);
+    else if (!page.canonicalSelf) addSeo('canonical', 'high', page.requestedUrl, `Canonical is not the audited URL: ${page.canonical}`);
+    if (!page.xDefault) addSeo('hreflang', 'medium', page.requestedUrl, 'Missing x-default alternate');
+    if (!page.reciprocity.reciprocal) addSeo('hreflang', 'high', page.requestedUrl, 'No reciprocal English/base alternate found');
+    if (page.contentSimilarity >= 0.9) addSeo('duplicate content', 'high', page.requestedUrl, `English baseline similarity ${page.contentSimilarity}`);
+    else if (page.contentSimilarity >= 0.7) addSeo('duplicate content', 'medium', page.requestedUrl, `English baseline similarity ${page.contentSimilarity}`);
+    if (page.englishMarkers.length >= 3 && !hostResult.languages.some((language) => language.startsWith('en'))) {
+      addSeo('translation', 'high', page.requestedUrl, `English markers remain: ${page.englishMarkers.join(', ')}`);
+    }
+    for (const issue of page.malformed) addSeo('translation', 'high', page.requestedUrl, `${issue.label}: ${issue.examples.join(', ')}`);
+    for (const issue of page.legacy) addSeo('legacy data', 'high', page.requestedUrl, `${issue.label}: ${issue.examples.join(', ')}`);
+    for (const link of page.brokenContactLinks) addSeo('contact link', 'high', page.requestedUrl, `${link.issue}: ${link.href}`);
+    for (const copyright of page.staleCopyright) addSeo('copyright', 'medium', page.requestedUrl, `Stale year ${copyright.year}: ${copyright.text}`);
+    if (page.placeholderMarkers.length && page.indexable) addSeo('placeholder', 'high', page.requestedUrl, `Indexable placeholder markers: ${page.placeholderMarkers.join(', ')}`);
     const sitemapCheck = hostResult.sitemap.pageChecks.find((item) => sameUrl(item.url, page.requestedUrl));
     page.sitemapInclusion = sitemapCheck ?? { url: page.requestedUrl, included: false, status: 'unknown' };
   }
-  if (hostResult.sitemap.type === 'none') add('sitemap', 'medium', hostRoot(hostResult.host), 'No language-host sitemap detected');
-  else if (!hostResult.sitemap.ownHostLocations) add('sitemap', 'medium', hostResult.sitemap.requestedUrl, 'Sitemap contains no URLs on its own host');
-  return findings;
+  if (hostResult.sitemap.type === 'none' && !hostResult.sitemap.transportFailures.length) addSeo('sitemap', 'medium', hostRoot(hostResult.host), 'No language-host sitemap detected');
+  else if (hostResult.sitemap.type !== 'none' && !hostResult.sitemap.ownHostLocations) addSeo('sitemap', 'medium', hostResult.sitemap.requestedUrl, 'Sitemap contains no URLs on its own host');
+  return {
+    seoFindings,
+    transportFailures: uniqueObjects(transportFailures, (item) => `${item.url}|${item.type}|${item.status}`),
+  };
 }
 
 async function auditHost(hostEntry, discovery) {
-  const paths = pathsForHost(hostEntry.host, discovery);
+  const sampling = pathsForHost(hostEntry.host, discovery);
+  const paths = sampling.sampledPaths;
   const auditedUrls = paths.map((path) => new URL(path, hostRoot(hostEntry.host)).href);
   const pagesPromise = Promise.all(paths.map(async (path) => {
     const targetUrl = new URL(path, hostRoot(hostEntry.host)).href;
@@ -598,9 +897,9 @@ async function auditHost(hostEntry, discovery) {
     return inspected;
   }));
   const [pages, sitemap] = await Promise.all([pagesPromise, sitemapForHost(hostEntry.host, auditedUrls)]);
-  const partial = { ...hostEntry, pages, sitemap };
-  const findings = findingsForHost(partial);
-  const result = { ...partial, findings };
+  const partial = { ...hostEntry, sampling, pages, sitemap };
+  const separated = findingsForHost(partial);
+  const result = { ...partial, ...separated };
   result.classification = classifyHost(result);
   return result;
 }
@@ -634,7 +933,7 @@ function applyDuplicateFindings(hosts, groups) {
     for (const match of group.matches) {
       const host = hosts.find((item) => item.host === match.host);
       if (!host) continue;
-      host.findings.push({
+      host.seoFindings.push({
         area: 'duplicate content',
         severity: group.field === 'body content' ? 'high' : 'medium',
         pageUrl: match.url,
@@ -651,6 +950,15 @@ function classificationCounts(hosts) {
   return counts;
 }
 
+function countBy(items, valueOf) {
+  const counts = {};
+  for (const item of items) {
+    const value = String(valueOf(item));
+    counts[value] = (counts[value] ?? 0) + 1;
+  }
+  return counts;
+}
+
 function recommendationFor(classification) {
   const map = {
     'keep indexed': 'Keep indexed; monitor hreflang, Search Console and translation quality.',
@@ -663,12 +971,17 @@ function recommendationFor(classification) {
 }
 
 async function buildReport() {
+  await loadPersistentCache();
   const discovery = await discoverHosts();
   const hosts = await mapLimit(discovery.hosts, HOST_CONCURRENCY, (host) => auditHost(host, discovery));
   const duplicates = duplicateGroups(hosts);
   applyDuplicateFindings(hosts, duplicates);
+  await scheduleCacheWrite(true);
   const warnings = [];
   if (!hosts.length) warnings.push('No language subdomains were discoverable from public hreflang, sitemap, redirect or link evidence. Review GTranslate configuration manually.');
+  const pages = hosts.flatMap((host) => host.pages);
+  const failures = hosts.flatMap((host) => host.transportFailures);
+  if (failures.length) warnings.push(`${failures.length} transport failures are reported separately and do not create SEO findings or disable recommendations.`);
   return {
     generatedAt: new Date().toISOString(),
     advisory: true,
@@ -680,6 +993,18 @@ async function buildReport() {
       hostCount: hosts.length,
     },
     classifications: classificationCounts(hosts),
+    statusDistribution: countBy(pages, (page) => page.status || 'transport-error'),
+    transport: {
+      failureCount: failures.length,
+      failuresByType: countBy(failures, (failure) => failure.type),
+      ...transportStats,
+      hostRequestCounts: Object.fromEntries([...hostRequestCounts.entries()].sort()),
+    },
+    cache: {
+      ...cacheStats,
+      ttlHours: cacheTtlMs / (60 * 60 * 1000),
+      location: cacheEnabled ? 'OS temporary directory or explicit --cache path' : 'disabled',
+    },
     hosts,
     duplicateGroups: duplicates,
     warnings,
@@ -706,7 +1031,10 @@ function renderMarkdown(report) {
     `- Language hosts discovered: ${report.discovery.hostCount}`,
     `- Discovery pages: ${report.discovery.pages.map((page) => `${page.requestedUrl} (HTTP ${page.status})`).join(', ')}`,
     `- Base sitemap: HTTP ${report.discovery.sitemap.status}; ${report.discovery.sitemap.locations.length} entries`,
-    `- Language URLs requested: ${report.hosts.reduce((sum, host) => sum + host.pages.length, 0)}`,
+    `- Deterministically sampled language URLs: ${report.hosts.reduce((sum, host) => sum + host.pages.length, 0)}`,
+    `- HTTP status distribution: ${Object.entries(report.statusDistribution).map(([status, count]) => `${status}: ${count}`).join('; ')}`,
+    `- Transport failures: ${report.transport.failureCount} (${Object.entries(report.transport.failuresByType).map(([type, count]) => `${type}: ${count}`).join('; ') || 'none'})`,
+    `- Cache: ${report.cache.enabled ? `${report.cache.hits} hits, ${report.cache.misses} misses, ${report.cache.writes} writes` : 'disabled'}`,
     `- Exact cross-host duplicate groups: ${report.duplicateGroups.length}`,
     `- Classifications: ${Object.entries(report.classifications).map(([name, count]) => `${name}: ${count}`).join('; ') || 'none'}`,
     '',
@@ -717,9 +1045,9 @@ function renderMarkdown(report) {
   lines.push(
     '## Host Classification',
     '',
-    '| Host | Language evidence | Pages | Sitemap | Classification | Recommendation |',
-    '| --- | --- | ---: | --- | --- | --- |',
-    ...report.hosts.map((host) => `| ${host.host} | ${md(host.languages.join(', ') || 'unknown')} | ${host.pages.length} | ${host.sitemap.type === 'none' ? 'not detected' : `${host.sitemap.type}, ${host.sitemap.locationCount} URLs`} | ${host.classification} | ${md(recommendationFor(host.classification))} |`),
+    '| Host | Language evidence | Sample | SEO findings | Transport failures | Sitemap | Classification | Recommendation |',
+    '| --- | --- | ---: | ---: | ---: | --- | --- | --- |',
+    ...report.hosts.map((host) => `| ${host.host} | ${md(host.languages.join(', ') || 'unknown')} | ${host.pages.length}/${host.sampling.discoveredPaths.length} | ${host.seoFindings.length} | ${host.transportFailures.length} | ${host.sitemap.type === 'none' ? 'not detected' : `${host.sitemap.type}, ${host.sitemap.locationCount} URLs`} | ${host.classification} | ${md(recommendationFor(host.classification))} |`),
     '',
     '## Page Evidence',
     '',
@@ -731,12 +1059,19 @@ function renderMarkdown(report) {
       lines.push(`| ${host.host} | ${md(page.requestedUrl)} | ${page.status}${page.redirected ? ` → ${md(page.finalUrl)} (${page.redirectCount} hop${page.redirectCount === 1 ? '' : 's'})` : ''} | ${md(page.title || '(missing)')} / ${md(page.h1s.join(' · ') || '(missing)')} | ${md(page.robots || '(default indexable)')} | ${md(page.canonical || '(missing)')} | ${page.alternates.length} alternates; reciprocal ${page.reciprocity.reciprocal ? 'yes' : 'no'}; x-default ${page.xDefault ? 'yes' : 'no'} | ${page.sitemapInclusion?.status === 'checked' ? (page.sitemapInclusion.included ? 'included' : 'not found') : 'unknown'} | ${page.contentSimilarity} |`);
     }
   }
-  lines.push('', '## Findings', '');
-  const allFindings = report.hosts.flatMap((host) => host.findings.map((finding) => ({ host: host.host, ...finding })));
+  lines.push('', '## SEO Findings', '');
+  const allFindings = report.hosts.flatMap((host) => host.seoFindings.map((finding) => ({ host: host.host, ...finding })));
   if (!allFindings.length) lines.push('- No actionable defects detected in the sampled pages.');
   else {
     lines.push('| Severity | Host | Area | URL | Evidence |', '| --- | --- | --- | --- | --- |');
     for (const finding of allFindings) lines.push(`| ${finding.severity} | ${finding.host} | ${finding.area} | ${md(finding.pageUrl)} | ${md(finding.detail)} |`);
+  }
+  lines.push('', '## Transport Failures', '');
+  const allTransport = report.hosts.flatMap((host) => host.transportFailures.map((failure) => ({ host: host.host, ...failure })));
+  if (!allTransport.length) lines.push('- None.');
+  else {
+    lines.push('| Host | Type | HTTP | Attempts | URL | Detail |', '| --- | --- | ---: | ---: | --- | --- |');
+    for (const failure of allTransport) lines.push(`| ${failure.host} | ${failure.type} | ${failure.status || '-'} | ${failure.attempts || '-'} | ${md(failure.url)} | ${md(failure.detail)} |`);
   }
   lines.push('', '## Duplicate Groups', '');
   if (!report.duplicateGroups.length) lines.push('- No exact cross-host title, description or body duplicates detected.');
@@ -765,9 +1100,12 @@ function renderConsole(report) {
     'Malendo language subdomain SEO audit',
     `Generated: ${report.generatedAt}`,
     `Hosts discovered: ${report.discovery.hostCount}`,
-    `Language URLs requested: ${report.hosts.reduce((sum, host) => sum + host.pages.length, 0)}`,
+    `Deterministically sampled language URLs: ${report.hosts.reduce((sum, host) => sum + host.pages.length, 0)}`,
     `Base sitemap: HTTP ${report.discovery.sitemap.status}, ${report.discovery.sitemap.locations.length} entries`,
     `Exact duplicate groups: ${report.duplicateGroups.length}`,
+    `HTTP status distribution: ${Object.entries(report.statusDistribution).map(([status, count]) => `${status}=${count}`).join(', ')}`,
+    `Transport failures: ${report.transport.failureCount}`,
+    `Cache: ${report.cache.enabled ? `${report.cache.hits} hits, ${report.cache.misses} misses, ${report.cache.writes} writes` : 'disabled'}`,
     '',
   ];
   if (report.warnings.length) lines.push('Warnings:', ...report.warnings.map((warning) => `- ${warning}`), '');
@@ -775,8 +1113,9 @@ function renderConsole(report) {
   if (!report.hosts.length) lines.push('- None discovered');
   for (const host of report.hosts) {
     lines.push(`- ${host.host} [${host.languages.join(', ') || 'unknown'}]: ${host.classification}`);
-    lines.push(`  pages=${host.pages.length}, findings=${host.findings.length}, sitemap=${host.sitemap.type}`);
-    for (const finding of host.findings) lines.push(`  ${finding.severity.toUpperCase()} ${finding.area}: ${finding.pageUrl} — ${finding.detail}`);
+    lines.push(`  sample=${host.pages.length}/${host.sampling.discoveredPaths.length}, seo=${host.seoFindings.length}, transport=${host.transportFailures.length}, sitemap=${host.sitemap.type}`);
+    for (const finding of host.seoFindings) lines.push(`  SEO ${finding.severity.toUpperCase()} ${finding.area}: ${finding.pageUrl} — ${finding.detail}`);
+    for (const failure of host.transportFailures) lines.push(`  TRANSPORT ${failure.type}: ${failure.url} — ${failure.detail}`);
   }
   lines.push('', 'No production changes were made. Check GSC before noindexing or disabling any host.');
   return lines.join('\n');

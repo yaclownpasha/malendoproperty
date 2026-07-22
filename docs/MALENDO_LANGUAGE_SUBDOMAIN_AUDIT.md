@@ -28,6 +28,22 @@ JSON report:
 node scripts/audit-malendo-language-subdomains.mjs --json
 ```
 
+The audit uses a resumable cache in the operating system's temporary directory by default. Successful HTTP `200` responses and definitive `404`/`410` responses are compressed and cached for 12 hours. Rate limits, timeouts and other transient failures are never cached.
+
+```bash
+node scripts/audit-malendo-language-subdomains.mjs --refresh
+node scripts/audit-malendo-language-subdomains.mjs --cache path/to/private-cache.json
+node scripts/audit-malendo-language-subdomains.mjs --cache-ttl-hours 6
+node scripts/audit-malendo-language-subdomains.mjs --no-cache
+```
+
+- `--refresh` ignores existing cached responses while rebuilding the cache.
+- `--cache` selects a local cache file.
+- `--cache-ttl-hours` changes the positive-response TTL.
+- `--no-cache` disables persistent caching but retains in-process request deduplication.
+
+The cache contains compressed copies of public HTML/XML only. It does not contain cookies, credentials or authorization data. Keep an explicit cache outside Git and never commit it.
+
 Static validation:
 
 ```bash
@@ -46,9 +62,25 @@ The audit begins with the English homepage, Contact page and Properties archive.
 - the base XML sitemap index;
 - final destinations and redirect chains from discovered language hosts.
 
-It requests every unique language URL found for those three discovery paths. For each language host, it also checks `sitemap_index.xml`, falls back to `wp-sitemap.xml`, and inspects a page sitemap when one is exposed.
+For each host, it always checks the homepage and selects one additional representative URL deterministically from the discovered Contact/Properties paths. The same host receives the same sample on every run. The audit also checks `sitemap_index.xml`, falls back to `wp-sitemap.xml`, and inspects one page sitemap when exposed.
 
 Discovery is bounded and intentionally does not crawl every URL in every language sitemap. This keeps the audit practical and avoids an aggressive crawl across tens of thousands of translated product and estate URLs.
+
+## Transport Hardening
+
+The request layer is deliberately conservative:
+
+- at most two language hosts are processed concurrently;
+- at most three network requests can be active globally;
+- each language host has a maximum budget of eight network attempts;
+- transient statuses (`408`, `425`, `429`, `502`, `503`, `504`) and network timeouts receive up to three attempts;
+- retry delays use exponential backoff;
+- `Retry-After` seconds or HTTP dates are honored, capped at 30 seconds;
+- redirect chains are followed manually and capped at six hops;
+- successful cached responses avoid repeat network traffic;
+- cache checkpoints are written every ten successful entries for resumability.
+
+Transport failures and SEO findings are separate in console, Markdown and JSON output. A timeout, rate limit, network error or exhausted request budget cannot create fake missing-title, missing-meta, missing-H1, canonical or hreflang findings.
 
 ## Checks
 
@@ -82,19 +114,19 @@ Every discovered language host receives exactly one classification.
 | `disable only after GSC confirmation` | Every sampled URL is definitively gone (`404`/`410`) or redirects off the language host. | Confirm traffic, backlinks and indexed URLs; prepare redirects before disabling anything. |
 | `manual review` | Evidence is incomplete or transport-limited, including timeouts and rate limiting. | Re-run more slowly or inspect manually. Do not change indexation from this result alone. |
 
-HTTP `429`, `403`, timeouts and other transport uncertainty never produce a recommendation to disable a host.
+HTTP `429`, `403`, timeouts, exhausted request budgets and other transport uncertainty never produce a recommendation to disable a host.
 
-## First Validation Run
+## Hardened Validation Run
 
-The first public run discovered 103 language subdomains from the GTranslate hreflang/link surface and 309 corresponding homepage, Contact and Properties URLs. The English sitemap index returned HTTP `200` with 22 child sitemap entries.
+The fresh hardened public run discovered 103 language subdomains from the GTranslate hreflang/link surface and deterministically audited 206 language pages. The English sitemap index returned HTTP `200` with 22 child sitemap entries.
 
-The run also demonstrated a material operational limitation: after sustained requests across the very large language surface, the translation layer returned HTTP `429` responses and timeouts for many hosts. Those hosts must remain `manual review`; their response failures are not evidence that the language versions should be disabled.
+All 206 sampled language pages returned HTTP `200`; the run recorded zero transport failures. The report classified 102 hosts as `keep but correct` and one host as `noindex pending GSC review`. The Latin host was the noindex-review candidate because its homepage retained multiple English markers. This remains a GSC/manual-review recommendation, not an instruction to change production.
 
-In the final JSON validation run, 29 of 309 language URL requests returned HTTP `200`, 16 returned HTTP `429`, and 264 timed out after earlier validation runs had already exercised the translation layer. Seven hosts were classified `keep but correct` from usable evidence and 96 were classified `manual review`. These counts describe that rate-limited run, not a permanent SEO decision.
+Missing `x-default` occurred on every sampled page. Fifty-two sampled pages had multiple H1 elements. One exact duplicate-title group joined the Malay and Sundanese Contact pages. These are audit signals requiring manual confirmation in GTranslate/WP admin.
 
-Responsive sampled hosts showed translated titles, while missing `x-default` was a recurring hreflang issue. The validation run found no exact cross-host duplicate group, but that result is limited to pages that returned usable HTML during the run.
+The fresh run took about seven minutes because low concurrency and backoff are intentional. The subsequent Markdown and JSON validations reused 519 successful cache entries, made zero network attempts, and completed in seconds.
 
-Run the tool again at a different time before making decisions, then compare the JSON outputs. A host should not move toward noindexing or retirement based on one rate-limited audit.
+Run the tool at a different time before making decisions, then compare JSON outputs. A host should not move toward noindexing or retirement based on one audit.
 
 ## JSON Structure
 
@@ -102,7 +134,10 @@ The JSON report contains:
 
 - `discovery`: seed paths, response evidence, base sitemap and host count;
 - `classifications`: host totals by decision category;
-- `hosts`: languages, discovery evidence, requested pages, metadata, redirects, hreflang, sitemap checks, content checks, findings and classification;
+- `statusDistribution`: HTTP status totals for deterministic page samples;
+- `transport`: failures by type, retry/budget statistics and per-host network-attempt counts;
+- `cache`: hit/miss/write statistics and TTL, without exposing a local path;
+- `hosts`: languages, discovery evidence, deterministic sampling, requested pages, metadata, redirects, hreflang, sitemap checks, `seoFindings`, `transportFailures` and classification;
 - `duplicateGroups`: exact title, description and body duplicates spanning multiple hosts;
 - `warnings` and `safety`: collection limitations and mandatory safeguards.
 
