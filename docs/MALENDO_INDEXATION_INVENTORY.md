@@ -80,7 +80,7 @@ Each URL is assigned one conservative review bucket:
 
 These are labels for human review. They are not instructions to delete, redirect, noindex, unpublish, or disable anything.
 
-Transport failures are recorded separately. A timeout, `429`, DNS failure, or other transport problem does not become an SEO classification.
+Transport failures are recorded separately. A timeout, `429`, DNS failure, or other transport problem does not become an SEO finding. Exhausted `429` and `5xx` responses use the conservative `manual-GSC-decision` review bucket rather than `legacy-broken`.
 
 ## Run The Audit
 
