@@ -327,6 +327,7 @@ async function requestText(url, options = {}) {
       continue;
     }
 
+    const retryableStatusExhausted = response.status === 429 || response.status >= 500;
     return {
       requestedUrl: reportUrl(url),
       finalUrl: reportUrl(currentUrl),
@@ -334,7 +335,9 @@ async function requestText(url, options = {}) {
       redirects,
       headers: Object.fromEntries(response.headers.entries()),
       body: await response.text(),
-      error: '',
+      error: retryableStatusExhausted
+        ? `HTTP ${response.status} after ${MAX_RETRIES + 1} attempts`
+        : '',
     };
   }
 
@@ -996,6 +999,9 @@ function duplicateGroups(records, signatureField) {
 }
 
 function classify(record) {
+  if (record.inspectionStatus === 'transport-error' || record.transportError) {
+    return 'manual-GSC-decision';
+  }
   if (
     (record.httpStatus && Number(record.httpStatus) >= 400)
     || record.oldEmail === true
