@@ -38,6 +38,17 @@ const ENGLISH_MARKERS = [
 ];
 
 const args = process.argv.slice(2);
+const SAFE_FLAGS = new Set(['json', 'markdown', 'no-cache', 'refresh']);
+const SAFE_VALUES = new Set(['cache', 'cache-ttl-hours']);
+const SENSITIVE_ARGUMENT = /(?:cookie|password|passwd|token|secret|authorization|credential|api[-_]?key|user(?:name)?)/i;
+
+try {
+  validateArguments(args);
+} catch (error) {
+  console.error(`Argument error: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
+
 const mode = args.includes('--json') ? 'json' : args.includes('--markdown') ? 'markdown' : 'console';
 const fetchCache = new Map();
 const persistentCache = new Map();
@@ -64,6 +75,39 @@ const cacheTtlMs = Number.isFinite(cacheTtlHours) && cacheTtlHours > 0
   : DEFAULT_CACHE_TTL_HOURS * 60 * 60 * 1000;
 const cacheStats = { enabled: cacheEnabled, hits: 0, misses: 0, writes: 0, ignoredExpired: 0, ignoredTransient: 0 };
 const transportStats = { networkAttempts: 0, retries: 0, retryAfterHonored: 0, budgetExhausted: 0 };
+
+function validateArguments(argv) {
+  const errors = [];
+  const outputModes = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (!argument.startsWith('--')) {
+      errors.push(`Unexpected positional argument: ${argument}`);
+      continue;
+    }
+    const key = argument.slice(2);
+    if (SENSITIVE_ARGUMENT.test(key)) {
+      errors.push(`Credential/authentication option is not supported: --${key}`);
+      if (argv[index + 1] && !argv[index + 1].startsWith("--")) {
+        index += 1;
+      }
+      continue;
+    }
+    if (SAFE_FLAGS.has(key)) {
+      if (key === 'json' || key === 'markdown') outputModes.push(key);
+      continue;
+    }
+    if (SAFE_VALUES.has(key)) {
+      const value = argv[index + 1];
+      if (!value || value.startsWith('--')) errors.push(`--${key} requires a value`);
+      else index += 1;
+      continue;
+    }
+    errors.push(`Unknown option: --${key}`);
+  }
+  if (outputModes.length > 1) errors.push('Choose only one output mode: --markdown or --json');
+  if (errors.length) throw new Error(errors.join('\n'));
+}
 
 function uniq(values) {
   return [...new Set(values.filter(Boolean))];
@@ -112,9 +156,9 @@ function metaOf(html, wanted) {
   return '';
 }
 
-function canonicalOf(html) {
+function canonicalOf(html, pageUrl = BASE_URL) {
   for (const tag of tags(html, 'link')) {
-    if (attr(tag, 'rel').toLowerCase().split(/\s+/).includes('canonical')) return attr(tag, 'href');
+    if (attr(tag, 'rel').toLowerCase().split(/\s+/).includes('canonical')) return reportUrl(attr(tag, 'href'), pageUrl);
   }
   return '';
 }
@@ -133,7 +177,7 @@ function alternateLinks(html, pageUrl) {
     const href = attr(tag, 'href');
     if (!rel.includes('alternate') || !language || !href) continue;
     try {
-      links.push({ language, url: new URL(href, pageUrl).href });
+      links.push({ language, url: reportUrl(href, pageUrl) });
     } catch {
       // Ignore malformed alternate URLs but record the raw tag elsewhere via findings.
     }
@@ -147,7 +191,7 @@ function anchorLinks(html, pageUrl) {
     const href = attr(tag, 'href');
     if (!href || /^(?:#|javascript:|mailto:|tel:)/i.test(href)) continue;
     try {
-      links.push(new URL(href, pageUrl).href);
+      links.push(reportUrl(href, pageUrl));
     } catch {
       // Ignore malformed public links.
     }
@@ -157,7 +201,7 @@ function anchorLinks(html, pageUrl) {
 
 function xmlLocations(xml) {
   return [...String(xml ?? '').matchAll(/<loc\b[^>]*>([\s\S]*?)<\/loc>/gi)]
-    .map((match) => decode(match[1]).trim())
+    .map((match) => reportUrl(decode(match[1]).trim()))
     .filter(Boolean);
 }
 
@@ -198,11 +242,24 @@ function safeHost(url) {
   }
 }
 
+function reportUrl(value, base = BASE_URL) {
+  try {
+    const url = new URL(value, base);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
 function sameUrl(left, right) {
   try {
     const a = new URL(left);
     const b = new URL(right);
-    const clean = (url) => `${url.protocol}//${url.hostname}${url.pathname.replace(/\/+$/, '') || '/'}${url.search}`;
+    const clean = (url) => `${url.protocol}//${url.hostname}${url.pathname.replace(/\/+$/, '') || '/'}`;
     return clean(a) === clean(b);
   } catch {
     return false;
@@ -270,8 +327,21 @@ function transportFailure(type, detail, status = 0, retryAfterMs = 0) {
   return { type, detail, status, retryAfterMs };
 }
 
+function sanitizeResponseUrls(response) {
+  return {
+    ...response,
+    requestedUrl: reportUrl(response.requestedUrl),
+    finalUrl: reportUrl(response.finalUrl),
+    redirectChain: (response.redirectChain ?? []).map((item) => ({
+      ...item,
+      url: reportUrl(item.url),
+      location: reportUrl(item.location),
+    })),
+  };
+}
+
 function serializeCachedResponse(response) {
-  const { body, ...metadata } = response;
+  const { body, ...metadata } = sanitizeResponseUrls(response);
   return {
     ...metadata,
     bodyGzip: gzipSync(Buffer.from(body ?? '', 'utf8')).toString('base64'),
@@ -280,11 +350,11 @@ function serializeCachedResponse(response) {
 
 function deserializeCachedResponse(value) {
   const { bodyGzip, ...metadata } = value;
-  return {
+  return sanitizeResponseUrls({
     ...metadata,
     body: bodyGzip ? gunzipSync(Buffer.from(bodyGzip, 'base64')).toString('utf8') : '',
     fromCache: true,
-  };
+  });
 }
 
 function cacheableResponse(response) {
@@ -365,7 +435,9 @@ async function requestAttempt(url, accept) {
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     try {
       const response = await fetch(url, {
+        method: 'GET',
         redirect: 'manual',
+        credentials: 'omit',
         headers: {
           accept,
           'user-agent': 'MalendoLanguageSubdomainAudit/2.0 (+https://malendo-property.com)',
@@ -384,7 +456,23 @@ async function requestAttempt(url, accept) {
 }
 
 async function fetchResource(url, accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7') {
-  const cacheKey = `${accept}|${url}`;
+  const safeRequestedUrl = reportUrl(url);
+  if (!safeRequestedUrl) {
+    return {
+      requestedUrl: '',
+      finalUrl: '',
+      status: 0,
+      ok: false,
+      contentType: '',
+      body: '',
+      redirectChain: [],
+      attempts: 0,
+      fromCache: false,
+      transportFailure: transportFailure('invalid-url', 'Request URL is invalid'),
+      error: 'Request URL is invalid',
+    };
+  }
+  const cacheKey = `${accept}|${safeRequestedUrl}`;
   if (fetchCache.has(cacheKey)) return fetchCache.get(cacheKey);
   const saved = cachedResponse(cacheKey);
   if (saved) {
@@ -394,7 +482,7 @@ async function fetchResource(url, accept = 'text/html,application/xhtml+xml,appl
   }
   const promise = (async () => {
     const redirectChain = [];
-    let currentUrl = url;
+    let currentUrl = safeRequestedUrl;
     let totalAttempts = 0;
     for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
       let attemptResult = null;
@@ -426,8 +514,8 @@ async function fetchResource(url, accept = 'text/html,application/xhtml+xml,appl
 
       if (lastFailure || !attemptResult?.response) {
         return {
-          requestedUrl: url,
-          finalUrl: currentUrl,
+          requestedUrl: safeRequestedUrl,
+          finalUrl: reportUrl(currentUrl),
           status: lastFailure?.status ?? 0,
           ok: false,
           contentType: '',
@@ -443,14 +531,14 @@ async function fetchResource(url, accept = 'text/html,application/xhtml+xml,appl
       const response = attemptResult.response;
       const location = response.headers.get('location');
       if (response.status >= 300 && response.status < 400 && location) {
-        const nextUrl = new URL(location, currentUrl).href;
-        redirectChain.push({ status: response.status, url: currentUrl, location: nextUrl });
+        const nextUrl = reportUrl(location, currentUrl);
+        redirectChain.push({ status: response.status, url: reportUrl(currentUrl), location: nextUrl });
         currentUrl = nextUrl;
         continue;
       }
       const result = {
-        requestedUrl: url,
-        finalUrl: currentUrl,
+        requestedUrl: safeRequestedUrl,
+        finalUrl: reportUrl(currentUrl),
         status: response.status,
         ok: response.ok,
         contentType: response.headers.get('content-type') ?? '',
@@ -465,8 +553,8 @@ async function fetchResource(url, accept = 'text/html,application/xhtml+xml,appl
       return result;
     }
     return {
-      requestedUrl: url,
-      finalUrl: currentUrl,
+      requestedUrl: safeRequestedUrl,
+      finalUrl: reportUrl(currentUrl),
       status: 0,
       ok: false,
       contentType: '',
@@ -489,6 +577,7 @@ function contactLinksOf(html, pageUrl) {
     if (!href || !/^(?:mailto:|tel:|https?:)/i.test(href)) continue;
     let type = '';
     let issue = '';
+    let reportedHref = href.split('?')[0];
     if (/^mailto:/i.test(href)) {
       type = 'email';
       const email = href.replace(/^mailto:/i, '').split('?')[0].trim();
@@ -513,8 +602,9 @@ function contactLinksOf(html, pageUrl) {
         if (parsed.protocol !== 'https:') issue = 'Contact destination is not HTTPS';
         else if (parsed.hostname !== ROOT_DOMAIN && parsed.hostname !== `www.${ROOT_DOMAIN}` && !isLanguageHost(parsed.hostname)) issue = 'Contact destination leaves the Malendo domain';
       }
+      reportedHref = reportUrl(parsed.href);
     }
-    if (type) contacts.push({ type, href, issue });
+    if (type) contacts.push({ type, href: reportedHref, issue });
   }
   return uniqueObjects(contacts, (item) => `${item.type}|${item.href}`);
 }
@@ -589,7 +679,7 @@ function inspectPage(resource, expectedHost, baseComparison) {
   const title = titleOf(html);
   const description = metaOf(html, 'description');
   const robots = metaOf(html, 'robots');
-  const canonical = canonicalOf(html);
+  const canonical = canonicalOf(html, resource.finalUrl || resource.requestedUrl);
   const h1s = h1sOf(html);
   const alternates = alternateLinks(html, resource.finalUrl || resource.requestedUrl);
   const bodyText = textOnly(html);

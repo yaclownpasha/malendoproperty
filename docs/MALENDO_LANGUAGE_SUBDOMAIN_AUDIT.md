@@ -4,7 +4,9 @@
 
 `scripts/audit-malendo-language-subdomains.mjs` is a read-only advisory audit for public language subdomains of `malendo-property.com`. It discovers the current public language surface instead of relying on a hard-coded language list, then records technical SEO and content-hygiene evidence for each discovered host.
 
-The script sends HTTP `GET` requests only. It does not log in, submit forms, change WordPress, update GTranslate, alter DNS or Cloudflare, edit redirects, or write robots, canonical, hreflang or sitemap settings.
+The script sends HTTP `GET` requests only with credentials omitted. It does not log in, submit forms, change WordPress, update GTranslate, alter DNS or Cloudflare, edit redirects, or write robots, canonical, hreflang or sitemap settings.
+
+Reported, requested and cached public URLs have URL credentials, query strings and fragments removed. Credential-style and unknown CLI options are rejected rather than silently ignored.
 
 ## Run
 
