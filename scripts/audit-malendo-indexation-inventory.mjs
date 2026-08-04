@@ -327,6 +327,11 @@ async function requestText(url, options = {}) {
       continue;
     }
 
+    const transportLimitedError = response.status === 403
+      ? 'HTTP 403 access denied'
+      : response.status === 429 || response.status >= 500
+        ? `HTTP ${response.status} after ${MAX_RETRIES + 1} attempts`
+        : '';
     return {
       requestedUrl: reportUrl(url),
       finalUrl: reportUrl(currentUrl),
@@ -334,7 +339,7 @@ async function requestText(url, options = {}) {
       redirects,
       headers: Object.fromEntries(response.headers.entries()),
       body: await response.text(),
-      error: '',
+      error: transportLimitedError,
     };
   }
 
@@ -996,6 +1001,9 @@ function duplicateGroups(records, signatureField) {
 }
 
 function classify(record) {
+  if (record.inspectionStatus === 'transport-error' || record.transportError) {
+    return 'manual-GSC-decision';
+  }
   if (
     (record.httpStatus && Number(record.httpStatus) >= 400)
     || record.oldEmail === true
