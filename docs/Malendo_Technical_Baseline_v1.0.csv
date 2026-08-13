@@ -1,0 +1,40 @@
+Source URL,Destination URL,HTTP status,Redirect chain,Canonical,Robots/indexability,Content type,Sitemap presence,Internal-link source,Final status,Issue category,Confidence,Evidence timestamp
+scope priority set,https://malendo-property.com/,200,"200 /",https://malendo-property.com/,"index, follow",text/html,not evaluated,scope,working,none,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/thailand/phuket/services/property-management/,200,"200 direct",https://malendo-property.com/thailand/phuket/services/property-management/,"index, follow",text/html,not evaluated,scope,working,none,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/contact/,200,"200 direct",https://malendo-property.com/contact/,"index, follow",text/html,not evaluated,scope,working,none,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/projects/,200,"301 /projects/ [X-Redirect-By WordPress] -> 200 /thailand/phuket/projects/",https://malendo-property.com/thailand/phuket/projects/,"index, follow at destination",text/html,not evaluated,scope,redirected,redirect source unresolved,medium,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/projects-thailand-phuket/,200,"301 /projects-thailand-phuket/ [X-Redirect-By Yoast SEO Premium] -> 200 /thailand/phuket/projects/",https://malendo-property.com/thailand/phuket/projects/,"index, follow at destination",text/html,not evaluated,scope,redirected,Yoast redirect,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/thailand/phuket/projects/,200,"200 direct",https://malendo-property.com/thailand/phuket/projects/,"index, follow",text/html,not evaluated,scope,working legacy hub,legacy route,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/cart/,200,"200 direct",https://malendo-property.com/cart/,"noindex, follow",text/html,yes page-sitemap.xml,scope,working system Page,noindex URL in sitemap,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/my-account/,200,"200 direct",https://malendo-property.com/my-account/,"noindex, follow",text/html,yes page-sitemap.xml,scope,working system Page,noindex URL in sitemap,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/request-phuket-project-check/,404,"404 direct",https://malendo-property.com/,"noindex, follow",text/html,no,scope,unpublished/unavailable,planned route 404,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/project-check-methodology-phuket/,404,"404 direct",https://malendo-property.com/,"noindex, follow",text/html,no,scope,unpublished/unavailable,planned route 404,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/projects/the-title-legendary-bang-tao-verification/,404,"404 direct",https://malendo-property.com/,"noindex, follow",text/html,no,scope,unpublished/unavailable,First-Wave route 404,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/projects/laguna-lakeside-phuket-verification/,404,"404 direct",https://malendo-property.com/,"noindex, follow",text/html,no,scope,unpublished/unavailable,First-Wave route 404,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/projects/the-base-bukit-phuket-verification/,404,"404 direct",https://malendo-property.com/,"noindex, follow",text/html,no,scope,unpublished/unavailable,First-Wave route 404,high,2026-08-13T14:03:43Z
+scope priority set,[Management Audit route not supplied],,,,[unknown],unknown,unknown,scope,not tested,missing authoritative route,none,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/robots.txt,200,"200 direct",,"not applicable",text/plain,not applicable,scope,working,declares broken rent sitemap,high,2026-08-13T14:03:43Z
+scope priority set,https://malendo-property.com/sitemap_index.xml,200,"200 direct",,"not applicable",text/xml,root sitemap,robots.txt,working,22 children and 1861 entries,high,2026-08-13T14:03:43Z
+robots.txt,https://malendo-property.com/rent-sitemap.xml,404,"404 direct",https://malendo-property.com/,"404 shell noindex",text/html,declared in robots.txt,robots.txt,broken,declared sitemap non-200,high,2026-08-13T14:05:00Z
+sitemap_index.xml,https://malendo-property.com/post-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,771 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/page-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,149 URLs,contains noindex system Pages,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/estate-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,215 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/category-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,668 URLs,large taxonomy cohort needs GSC evidence,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/property-type-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,9 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/offer-type-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,2 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/offer-typee-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,9 URLs,possible duplicate/misspelled taxonomy review,medium,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/rent-type-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,5 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/sell-type-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,2 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/country-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,1 URL,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/province-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,1 URL,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/neighborhood-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,0 URLs,empty child sitemap,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/street-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,0 URLs,empty child sitemap,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/beach-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,0 URLs,empty child sitemap,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/view-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,3 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/floor-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,2 URLs,none,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/filter-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,10 URLs,utility taxonomy needs GSC evidence,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/property-features-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,8 URLs,utility taxonomy needs GSC evidence,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/pets-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,3 URLs,utility taxonomy needs GSC evidence,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/developer-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,0 URLs,empty child sitemap,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/place-of-property-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,0 URLs,empty child sitemap,high,2026-08-13T14:03:43Z
+sitemap_index.xml,https://malendo-property.com/author-sitemap.xml,200,"200 direct",,"not applicable",text/xml,yes,,3 URLs,author cohort needs GSC evidence,high,2026-08-13T14:03:43Z
