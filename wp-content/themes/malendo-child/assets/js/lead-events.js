@@ -1,6 +1,14 @@
 (function () {
     'use strict';
 
+    if (window.__malendoLeadEventsInitialized) {
+        return;
+    }
+
+    window.__malendoLeadEventsInitialized = true;
+
+    var formSubmissionStates = new WeakMap();
+
     function hasGtag() {
         return typeof window.gtag === 'function';
     }
@@ -20,39 +28,6 @@
         window.dataLayer.push(Object.assign({ event: eventName }, payload));
     }
 
-    function leadTypeForEvent(eventName) {
-        var leadTypes = {
-            click_phone: 'phone',
-            click_email: 'email',
-            click_whatsapp: 'whatsapp',
-            click_telegram: 'telegram',
-            click_submit_application: 'submit_application',
-            form_submit_attempt: 'form'
-        };
-
-        return leadTypes[eventName] || '';
-    }
-
-    function sendGenerateLead(sourceEvent) {
-        var leadType = leadTypeForEvent(sourceEvent);
-
-        if (!leadType) {
-            return;
-        }
-
-        sendEvent('generate_lead', {
-            lead_type: leadType,
-            source_event: sourceEvent
-        });
-    }
-
-    function cleanText(text) {
-        return (text || '')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 80);
-    }
-
     function normalizeText(text) {
         return (text || '')
             .replace(/\s+/g, ' ')
@@ -68,10 +43,8 @@
         }
     }
 
-    function getFormActionPath(form) {
-        var actionUrl = safeUrl(form.getAttribute('action') || '');
-
-        return actionUrl ? actionUrl.pathname : '';
+    function pagePath() {
+        return window.location.pathname || '/';
     }
 
     function isInternalPropertyUrl(url) {
@@ -106,8 +79,7 @@
             form.getAttribute('class') || '',
             form.getAttribute('name') || '',
             form.getAttribute('role') || '',
-            form.getAttribute('action') || '',
-            getFormActionPath(form)
+            form.getAttribute('action') || ''
         ].join(' '));
     }
 
@@ -148,9 +120,90 @@
         return /contact|inquiry|enquiry|request|viewing|submit[\s_-]*application|application|lead/i.test(descriptor);
     }
 
+    function safeFormId(form, detail) {
+        var wrapper = formClosestMatches(form, '.wpcf7') ? form.closest('.wpcf7') : null;
+        var candidates = [
+            detail && detail.contactFormId,
+            wrapper && wrapper.getAttribute('data-wpcf7-id'),
+            form.id
+        ];
+        var candidate;
+        var match;
+        var i;
+
+        for (i = 0; i < candidates.length; i += 1) {
+            candidate = String(candidates[i] || '').trim();
+
+            if (/^\d{1,12}$/.test(candidate)) {
+                return candidate;
+            }
+
+            match = candidate.match(/^wpcf7-f(\d{1,12})(?:-|$)/i);
+
+            if (match) {
+                return match[1];
+            }
+
+        }
+
+        return 'unknown';
+    }
+
+    function eventParameters(form, status, detail) {
+        return {
+            funnel: 'contact_form_7',
+            form_id: safeFormId(form, detail),
+            page_path: pagePath(),
+            submission_status: status
+        };
+    }
+
+    function formFromCf7Event(event) {
+        var target = event && event.target;
+
+        if (!target) {
+            return null;
+        }
+
+        if (target.tagName && target.tagName.toLowerCase() === 'form') {
+            return target;
+        }
+
+        if (target.querySelector) {
+            return target.querySelector('form.wpcf7-form');
+        }
+
+        return null;
+    }
+
+    function handleCf7Result(event, eventName, status, isSuccess) {
+        var form = formFromCf7Event(event);
+        var state;
+        var params;
+
+        if (!form || !isContactForm7Form(form)) {
+            return;
+        }
+
+        state = formSubmissionStates.get(form);
+
+        // A CF7 result is only attributable after this script observed a real submit attempt.
+        if (!state || state.completed) {
+            return;
+        }
+
+        state.completed = true;
+        params = eventParameters(form, status, event.detail || {});
+        sendEvent(eventName, params);
+
+        if (isSuccess) {
+            sendEvent('generate_lead', params);
+        }
+    }
+
     function classifyLink(anchor) {
         var href = anchor.getAttribute('href') || '';
-        var text = cleanText(anchor.innerText || anchor.getAttribute('aria-label') || anchor.getAttribute('title'));
+        var text = anchor.innerText || anchor.getAttribute('aria-label') || anchor.getAttribute('title') || '';
         var url = safeUrl(href);
         var lowerHref = href.toLowerCase();
 
@@ -158,7 +211,8 @@
             return {
                 name: 'click_phone',
                 params: {
-                    link_text: text
+                    cta_type: 'phone',
+                    page_path: pagePath()
                 }
             };
         }
@@ -167,7 +221,8 @@
             return {
                 name: 'click_email',
                 params: {
-                    link_text: text
+                    cta_type: 'email',
+                    page_path: pagePath()
                 }
             };
         }
@@ -176,8 +231,8 @@
             return {
                 name: 'click_whatsapp',
                 params: {
-                    link_host: url.hostname,
-                    link_text: text
+                    cta_type: 'whatsapp',
+                    page_path: pagePath()
                 }
             };
         }
@@ -186,8 +241,8 @@
             return {
                 name: 'click_telegram',
                 params: {
-                    link_host: url.hostname,
-                    link_text: text
+                    cta_type: 'telegram',
+                    page_path: pagePath()
                 }
             };
         }
@@ -196,9 +251,8 @@
             return {
                 name: 'click_submit_application',
                 params: {
-                    link_host: url ? url.hostname : '',
-                    link_path: url ? url.pathname : '',
-                    link_text: text
+                    cta_type: 'submit_application',
+                    page_path: pagePath()
                 }
             };
         }
@@ -207,8 +261,8 @@
             return {
                 name: 'click_property_card',
                 params: {
-                    link_path: url.pathname,
-                    link_text: text
+                    cta_type: 'property_card',
+                    page_path: pagePath()
                 }
             };
         }
@@ -230,12 +284,10 @@
         }
 
         sendEvent(classified.name, classified.params);
-        sendGenerateLead(classified.name);
     }, true);
 
     document.addEventListener('submit', function (event) {
         var form = event.target;
-        var actionPath;
 
         if (!form || !form.tagName || form.tagName.toLowerCase() !== 'form') {
             return;
@@ -245,13 +297,32 @@
             return;
         }
 
-        actionPath = getFormActionPath(form);
+        if (isContactForm7Form(form)) {
+            formSubmissionStates.set(form, { completed: false });
+        }
 
-        sendEvent('form_submit_attempt', {
-            form_id: form.id || '',
-            form_class: cleanText(form.getAttribute('class') || ''),
-            form_action_path: actionPath
-        });
-        sendGenerateLead('form_submit_attempt');
+        sendEvent('form_submit_attempt', isContactForm7Form(form) ?
+            eventParameters(form, 'attempt', {}) : {
+                funnel: 'lead_form',
+                form_id: 'unknown',
+                page_path: pagePath(),
+                submission_status: 'attempt'
+            });
     }, true);
+
+    document.addEventListener('wpcf7mailsent', function (event) {
+        handleCf7Result(event, 'form_submit_success', 'success', true);
+    });
+
+    document.addEventListener('wpcf7invalid', function (event) {
+        handleCf7Result(event, 'form_submit_invalid', 'invalid', false);
+    });
+
+    document.addEventListener('wpcf7spam', function (event) {
+        handleCf7Result(event, 'form_submit_spam', 'spam', false);
+    });
+
+    document.addEventListener('wpcf7mailfailed', function (event) {
+        handleCf7Result(event, 'form_submit_failed', 'mail_failed', false);
+    });
 }());
