@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "source_commit": "e23ef676d35489c7677718d4a62756d92cea159d",
+  "github_base": "3906aff3f38971e30b5815b27f3830cee622b20d",
+  "source_host": "malendo-web-prod-01",
+  "source_directory": "/srv/malendo-recovery/site/wp-content/themes/malendo-recovery/",
+  "observed_at_utc": "2026-11-03T17:27:12Z",
+  "file_count": 12,
+  "total_bytes": 40749,
+  "files": [
+    {
+      "path": "wp-content/themes/malendo-recovery/404.php",
+      "sha256": "c7855b0a18ed4f8f13b9f990376334c769ef99fc797c1ad2e955e4278c3208ad",
+      "bytes": 392
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/analytics.js",
+      "sha256": "ffcdf67956d5cd41791c7e9186c76bd652befc362e636072651a29c4059ba0d0",
+      "bytes": 4241
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/footer.php",
+      "sha256": "1dd5163906bce3e0268d2eedd7204a3c2927ce41a002dbf5b65e7b48189b8ca1",
+      "bytes": 2894
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/front-page.php",
+      "sha256": "feb3363a58437a8c322484239351a2dc49f56d32b2399e30978e3f9b13514b7c",
+      "bytes": 140
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/functions.php",
+      "sha256": "3bf6c6a31308808906b219ac4f13ac82997db32bf1020d0a339b241cd74c9925",
+      "bytes": 937
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/header.php",
+      "sha256": "086fa20eda109c8de6c22680984ce7f17ae00cf78e9ff7618196ebe819ca76fc",
+      "bytes": 1620
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/inc-analytics.php",
+      "sha256": "b61bc3c47743c5df963738991ced2db7d60e4c8f1231a672c30a73f0501771f7",
+      "bytes": 5463
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/inc-i18n.php",
+      "sha256": "e9bf8aea5a670eaa9f03bf8a798712f09fafa001b02158e8b0a7f4c31f02c324",
+      "bytes": 3310
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/inc-leads.php",
+      "sha256": "ef788e446cdaa59e645e80a307ab9ae76b8cc2529e42a8adad0e9f71faf336b8",
+      "bytes": 11275
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/index.php",
+      "sha256": "e6034b8dd9da7d2502d55409eaa4d760908be4145863e8bcdc09c02373848613",
+      "bytes": 599
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/page.php",
+      "sha256": "97cc8f14629a73cd35621aa37c5505e9fb358a9e39c58752821358f3a4ea1584",
+      "bytes": 601
+    },
+    {
+      "path": "wp-content/themes/malendo-recovery/style.css",
+      "sha256": "a2c51c66dc86e67bc54b1a428fad69aa6149327ccbb923df86418887ed85f3c2",
+      "bytes": 9277
+    }
+  ]
+}
