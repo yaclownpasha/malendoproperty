@@ -1,0 +1,11 @@
+[Unit]
+Description=Malendo notification schedule example (review only)
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=1min
+RandomizedDelaySec=10
+Unit=malendo-notifications.service
+
+[Install]
+WantedBy=timers.target

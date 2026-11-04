@@ -1,0 +1,18 @@
+{
+  "runtime": "v24.22.1",
+  "tests": {
+    "no_tag_{}": "PASS",
+    "no_tag_{\"choice\":\"deny\"}": "PASS",
+    "no_tag_{\"choice\":\"allow\",\"qa\":true}": "PASS",
+    "no_tag_{\"choice\":\"allow\",\"host\":\"example.invalid\"}": "PASS",
+    "allow_one_tag_and_page_view": "PASS",
+    "saved_receipt_once_even_repeated_allow": "PASS",
+    "no_receipt_no_conversion": "PASS",
+    "query_hash_referrer_pii_removed": "PASS",
+    "deny_then_allow_and_withdraw": "PASS",
+    "form_start_deduplicated_and_contacts_whitelisted": "PASS"
+  },
+  "passed": 10,
+  "total": 10,
+  "network_requests": 0
+}

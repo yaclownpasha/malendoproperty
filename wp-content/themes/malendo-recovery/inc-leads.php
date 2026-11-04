@@ -34,6 +34,30 @@ function malendo_recovery_redirect_form(string $state): void {
 
 add_action('admin_post_nopriv_malendo_lead_submit', 'malendo_recovery_receive_lead');
 add_action('admin_post_malendo_lead_submit', 'malendo_recovery_receive_lead');
+/** wpdb can log its full SQL on a failed meta write. Scope suppression to this batch. */
+function malendo_store_enquiry_fields(int $id, array $fields): bool {
+    global $wpdb, $EZSQL_ERROR;
+    $previous = $wpdb->suppress_errors(true);
+    $errorCount = is_array($EZSQL_ERROR) ? count($EZSQL_ERROR) : 0;
+    $queryCount = count($wpdb->queries ?? []);
+    $ok = true;
+    try {
+        foreach ($fields as $key=>$value) {
+            update_post_meta($id, '_malendo_'.$key, wp_slash($value));
+            // False alone may mean unchanged. Read-back below is still required.
+            if ($wpdb->last_error !== '') { $ok = false; }
+        }
+    } catch (Throwable $e) {
+        $ok = false;
+    } finally {
+        $wpdb->suppress_errors($previous);
+        // Core retains raw statements for EZSQL_ERROR and optional SAVEQUERIES.
+        if (is_array($EZSQL_ERROR)) { $EZSQL_ERROR = array_slice($EZSQL_ERROR, 0, $errorCount); }
+        if (isset($wpdb->queries)) { $wpdb->queries = array_slice($wpdb->queries, 0, $queryCount); }
+    }
+    return $ok;
+}
+
 function malendo_recovery_receive_lead(): void {
     if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') {
         status_header(405);
@@ -47,7 +71,7 @@ function malendo_recovery_receive_lead(): void {
     if (!empty($_POST['website'])) {
         malendo_recovery_redirect_form('invalid');
     }
-    if (empty($_POST['consent'])) {
+    if (($_POST['consent'] ?? null) !== 'yes') {
         malendo_recovery_redirect_form('consent');
     }
     $request = static function (string $key, int $max): string {
@@ -74,6 +98,13 @@ function malendo_recovery_receive_lead(): void {
     if (get_transient($rateKey)) {
         malendo_recovery_redirect_form('rate');
     }
+    // Capture the activation generation before insertion; never backfill old enquiries.
+    $review = null;
+    $activation = null;
+    try { $activation = malendo_notification_activation(); }
+    catch (Malendo_Notification_DB_Error $e) { $review = 'activation_read_unknown'; }
+    catch (Malendo_Notification_Activation_Invalid $e) { $review = 'activation_invalid'; }
+    $qa = !empty($_POST['_malendo_qa']) || isset($_GET['malendo_qa']);
     $title = sprintf('Enquiry %s — %s', current_time('Y-m-d H:i'), $service);
     $id = wp_insert_post(array(
         'post_type' => 'malendo_lead',
@@ -84,13 +115,33 @@ function malendo_recovery_receive_lead(): void {
     if (is_wp_error($id) || !$id) {
         malendo_recovery_redirect_form('server');
     }
-    foreach (array('name' => $name, 'email' => $email, 'phone' => $phone,
+    $fields = array('name' => $name, 'email' => $email, 'phone' => $phone,
                    'service' => $service, 'message' => $message,
                    'landing' => home_url((isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? '/ru/contact/' : '/contact/'),
-                   'locale' => (isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? 'ru' : 'en') as $key => $value) {
-        update_post_meta($id, '_malendo_' . $key, $value);
+                   'locale' => (isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? 'ru' : 'en',
+                   'consented_at' => current_time('mysql', true));
+    $saveError = 'required_fields_or_marker';
+    try {
+        $saved = malendo_store_enquiry_fields((int)$id, $fields)
+            && malendo_lead_saved_marker((int)$id, $fields, $activation, $qa, $review);
+    } catch (Malendo_Confirmation_Unresolved $e) {
+        // Fields and preparation were verified. The confirmation write may have committed.
+        // Do not replace the winner, fire a success hook or ask the visitor to submit twice.
+        error_log('Malendo confirmation unresolved; enquiry ID ' . (int)$id);
+        malendo_recovery_redirect_form('confirmation_pending');
+    } catch (Malendo_Notification_DB_Error $e) {
+        $saved = false;
+        $saveError = 'save_verification_unavailable';
+        if (!$qa && $id > MALENDO_LAST_HISTORICAL_LEAD) {
+            try { (new Malendo_Outbox(new Malendo_WP_Outbox()))->recordAttention((int)$id, $saveError); }
+            catch (Malendo_Notification_DB_Error $ignored) { /* Also flag the preserved record below. */ }
+        }
     }
-    update_post_meta($id, '_malendo_consented_at', current_time('mysql', true));
+    if (!$saved) {
+        update_post_meta($id, '_malendo_save_error', $saveError);
+        error_log('Malendo incomplete enquiry save; ID ' . (int)$id);
+        malendo_recovery_redirect_form('server');
+    }
     do_action('malendo_enquiry_saved', (int)$id);
     set_transient($rateKey, 1, 45);
     malendo_recovery_redirect_form('submitted');
@@ -103,6 +154,9 @@ add_shortcode('malendo_contact_form', static function (): string {
     ob_start();
     if ($submitted) {
         echo malendo_text('<div class="form-message form-success" role="status"><strong>Enquiry received.</strong> Your message has been saved for review by Malendo Property. For urgent requests, use WhatsApp.</div>','<div class="form-message form-success" role="status"><strong>Запрос получен.</strong> Сообщение сохранено для рассмотрения Malendo Property. По срочным вопросам используйте WhatsApp.</div>');
+    } elseif ($error === 'confirmation_pending') {
+        echo malendo_text('<div class="form-message" role="status">Your details were saved. Confirmation is pending. Please do not submit again. For urgent requests, use WhatsApp.</div>',
+            '<div class="form-message" role="status">Данные сохранены. Подтверждение ожидается. Повторно отправлять форму не нужно. По срочным вопросам используйте WhatsApp.</div>');
     } elseif ($error !== '') {
         echo malendo_text('<div class="form-message form-error" role="alert">Your enquiry was not submitted. Check required fields, consent and email format, then try again. For urgent requests, use WhatsApp.</div>','<div class="form-message form-error" role="alert">Запрос не отправлен. Проверьте обязательные поля, согласие и email, затем повторите попытку. По срочным вопросам используйте WhatsApp.</div>');
     }
