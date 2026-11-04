@@ -47,7 +47,7 @@ function malendo_recovery_receive_lead(): void {
     if (!empty($_POST['website'])) {
         malendo_recovery_redirect_form('invalid');
     }
-    if (empty($_POST['consent'])) {
+    if (($_POST['consent'] ?? null) !== 'yes') {
         malendo_recovery_redirect_form('consent');
     }
     $request = static function (string $key, int $max): string {
@@ -74,6 +74,9 @@ function malendo_recovery_receive_lead(): void {
     if (get_transient($rateKey)) {
         malendo_recovery_redirect_form('rate');
     }
+    // Capture the activation generation before insertion; never backfill old enquiries.
+    $activation = malendo_notification_activation();
+    $qa = !empty($_POST['_malendo_qa']) || isset($_GET['malendo_qa']);
     $title = sprintf('Enquiry %s — %s', current_time('Y-m-d H:i'), $service);
     $id = wp_insert_post(array(
         'post_type' => 'malendo_lead',
@@ -84,13 +87,21 @@ function malendo_recovery_receive_lead(): void {
     if (is_wp_error($id) || !$id) {
         malendo_recovery_redirect_form('server');
     }
-    foreach (array('name' => $name, 'email' => $email, 'phone' => $phone,
+    $fields = array('name' => $name, 'email' => $email, 'phone' => $phone,
                    'service' => $service, 'message' => $message,
                    'landing' => home_url((isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? '/ru/contact/' : '/contact/'),
-                   'locale' => (isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? 'ru' : 'en') as $key => $value) {
-        update_post_meta($id, '_malendo_' . $key, $value);
+                   'locale' => (isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? 'ru' : 'en',
+                   'consented_at' => current_time('mysql', true));
+    foreach ($fields as $key => $value) {
+        update_post_meta($id, '_malendo_' . $key, wp_slash($value));
     }
-    update_post_meta($id, '_malendo_consented_at', current_time('mysql', true));
+    // update_post_meta(false) can mean unchanged, so verify exact read-back instead.
+    // The final durable marker closes the save/enqueue crash gap for reconciliation.
+    if (!malendo_lead_saved_marker((int)$id, $fields, $activation, $qa)) {
+        update_post_meta($id, '_malendo_save_error', 'required_fields_or_marker');
+        error_log('Malendo incomplete enquiry save; ID ' . (int)$id);
+        malendo_recovery_redirect_form('server');
+    }
     do_action('malendo_enquiry_saved', (int)$id);
     set_transient($rateKey, 1, 45);
     malendo_recovery_redirect_form('submitted');

@@ -18,5 +18,6 @@ add_action('wp_head', function () {
 add_filter('xmlrpc_enabled', '__return_false');
 
 require_once __DIR__ . '/inc-i18n.php';
+require_once __DIR__ . '/inc-notifications.php';
 require_once __DIR__ . '/inc-leads.php';
 require_once __DIR__ . '/inc-analytics.php';
