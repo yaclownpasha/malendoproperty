@@ -6,6 +6,21 @@ Stacked Draft PR: HEAD `codex/malendo-gmail-notifications`, BASE
 The existing workflow has no PR trigger and deploys only legacy-theme/workflow changes
 on main or explicit dispatch. This change touches neither; do not run it.
 
+## Revision 3 · read-only acceptance handoff
+
+Review the single child commit of `449a2da457f821af07395051a79acfcd3053fe52`.
+The parent reproduced both failures under the new tests. [Test evidence](../scripts/malendo-notifications/evidence/revision-3.json).
+
+| Ordered scenario | Required observations |
+|---|---|
+| Pause the form after preparing its marker. Run a healthy worker before each of the form's two failing reads. Run three further workers after the form error. | All fields remain private. No success receipt. One owner-visible `needs_review` job. Zero send POSTs throughout. |
+| For seven worker cycles return 401 to the first POST, then fail the eligibility SELECT before the refreshed send. | Five send POSTs total. Persisted attempts by cycle: 1, 2, 3, 4, 5, 5, 5. Terminal `failed / attempt_limit`. Also exercise the WP adapter with a competing worker. |
+| Stop the form before the confirmation INSERT, or immediately after it but before the saved hook. | Before: no send and the owner metabox reports unverified preparation. After: reconciliation creates one job and only one POST across restarts. |
+| Lose the confirmation INSERT acknowledgment while a worker accepts the confirmed lead. Also test a rejected write and loss of both write results. | A proven confirmation remains successful. A definitive hold cannot send. If the decision cannot be read, show the visitor a pending message and suppress the success hook. Only a durable matching proof can later recover an automatic notification. |
+| Lose the POST reservation acknowledgment or use a legacy marker, legacy job, corrupt counter or mismatched proof. | No blind send. An ambiguous persisted reservation becomes `unknown_delivery` at lease expiry, without replay. |
+
+Rerun the offline commands below on the published HEAD, including the two `p0_` defect reproductions. Inspect the `sending` CAS and the proof read on both admission and pre-POST validation. Native WordPress/MariaDB concurrency, object cache and disconnect/reconnect behavior remain NOT RUN until a separate existing test DB is available. Production, transport activation, OAuth, real forms and mail remain outside this review.
+
 ## Revision 2 · read-only acceptance handoff
 
 The review of `65f081b0d8c148dff696871d3f4705fad65475e4` reproduced R1–R5.
@@ -37,12 +52,23 @@ The safe error log contains the enquiry ID. Verification reads the private post,
 required fields and completion marker with checked SQL snapshots. A submit-side one-off
 read failure can repeat a SELECT without repeating the insertion or saved hook.
 
-The final `_malendo_saved_v1` marker contains a hash of the complete saved field set,
-activation generation, eligibility, QA flag, saved time and whitelisted service. A confirmed missing activation has eligibility false. Unreadable or malformed
-activation gets an explicit review code without any inferred generation. QA and historical
-IDs are excluded. The marker contains no raw client fields. If the PHP request dies after this marker but before
-enqueue, reconciliation creates the missing job. A crash before the marker cannot
-produce a notification. No old unmarked record is inferred to be complete.
+A new `_malendo_saved_v1` marker is explicitly **prepared**. It captures the complete
+field hash, activation generation, QA flag, time, service and a per-preparation nonce.
+After reading the fields and marker back together, the form publishes their proof by a
+single insert into the unique, non-autoloaded option `malendo_confirm_v3_<ID>` containing
+the SHA-256 of those exact marker bytes. The prepared marker records intent and never
+contains the old worker’s eligible=true permission. A marker by itself cannot authorize a send.
+The form never promotes another request's existing preparation. A previously confirmed
+save can be checked idempotently. A crash after confirmation but before enqueue is
+recovered from the proof. A preparation left by a crash is visible on the owner metabox.
+
+On an uncertain confirmation INSERT, a competing insert of `hold` fences a late write.
+Exactly one value can win. A matching proof means success, a definitive hold means
+manual review. If neither outcome is observable, keep the stored fields, show a
+pending response and avoid firing a success hook. Reconciliation and pre-POST
+eligibility both require a matching proof, intact fields and the original generation.
+QA, historical IDs and pre-activation records are excluded. Unknown activation
+never acquires a generation later. Legacy markers carry no proof.
 
 `inc-notifications.php` adds one unique `options.option_name` per ID/version with
 `autoload=no`. Reads bypass WordPress option caches; transitions compare the complete
@@ -54,7 +80,8 @@ States: `pending`, `claimed` (pre-send), `sending`, `retry`, `accepted`, `failed
 safe status/error code, optional Gmail message ID and up to 20 UTC/Bangkok log entries.
 No headers, credentials, MIME body, names, contact fields or free-form API errors are logged.
 
-Before any Gmail call the worker durably transitions to `sending`. Expired `claimed`
+Before every messages.send POST, including a 401 refresh attempt, one fenced transition
+reserves the next persistent attempt and changes the state to `sending`. Expired `claimed`
 work can be retried; expired `sending` becomes `unknown_delivery`. A lost SQL write after
 Gmail success also leaves the job requiring reconciliation. No automatic retry of unknown,
 accepted, failed or needs-reauth entries. This deliberately does not promise exactly-once
@@ -87,7 +114,10 @@ webroot, theme code and Git; no symlink file. Fields are `client_id`, `client_se
 `refresh_token`, `sender`. Never put a populated example in Git or a secret in CLI args.
 Production CLI dependencies: PHP 8.3, JSON, cURL, POSIX; PCNTL enables graceful signals.
 
-Five attempts maximum. A confirmed 429, a 403 containing only rateLimitExceeded or
+Five send POST reservations maximum per job. A pre-send DB read consumes none.
+A rejected 401 consumes one and is never refunded. Legacy pending jobs without a
+trusted counter protocol require manual review. Pre-send token failures have a separate
+five-failure bound. A confirmed 429, a 403 containing only rateLimitExceeded or
 userRateLimitExceeded reasons, or a proven DNS/connect failure before upload uses exponential
 backoff (60 seconds doubling plus 0–30 seconds jitter), respecting Retry-After. Delays over
 one day require review. OAuth failures before sending can safely retry. One 401 allows one
@@ -190,8 +220,9 @@ independent Work can check:
 
 ## Rollback
 
-Stop/disable only the future timer and transport first; preserve all jobs, activation,
-completion markers, accepted/unknown results and every enquiry. Revert the two modified
+Stop/disable only the future timer and transport first. Preserve all jobs, activation,
+prepared markers, confirmation/hold options, accepted/unknown results and every enquiry.
+Do not run an older notifications worker against Revision 3 data: it cannot interpret its proof gate. Revert the two modified
 theme files and remove the notifications include/file together to accepted baseline SHA.
 Never restore an old DB or delete the queue. On reinstallation reuse the generation and
 terminal markers; baseline-era unmarked submissions must not become automatic backfill.

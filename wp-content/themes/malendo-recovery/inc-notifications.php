@@ -3,9 +3,11 @@
 if (!defined('ABSPATH')) { exit; }
 
 const MALENDO_LAST_HISTORICAL_LEAD = 57;
+const MALENDO_CONFIRM_PREFIX = 'malendo_confirm_v3_';
 
 class Malendo_Notification_DB_Error extends RuntimeException {}
 class Malendo_Notification_Activation_Invalid extends RuntimeException {}
+class Malendo_Confirmation_Unresolved extends RuntimeException {}
 
 /** Inspect last_error before any later query can clear it. Never log its SQL or text. */
 function malendo_checked_query($result) {
@@ -80,7 +82,7 @@ final class Malendo_Outbox {
     }
     public function enqueue(int $id, array $ready): bool {
         if ($id <= MALENDO_LAST_HISTORICAL_LEAD || empty($ready['eligible']) || !empty($ready['qa'])) { return false; }
-        $job=array('id'=>$id,'generation'=>$ready['generation'],'saved_at'=>$ready['saved_at'],
+        $job=array('id'=>$id,'protocol'=>3,'generation'=>$ready['generation'],'saved_at'=>$ready['saved_at'],
             'service'=>$ready['service'],'state'=>'pending','attempts'=>0,'next'=>($this->clock)(),
             'lease'=>0,'message_id'=>null,'log'=>array());
         $job=$this->stamp($job,'pending','queued');
@@ -110,30 +112,38 @@ final class Malendo_Outbox {
             $job=$snapshot['job'];
         }
         if (!in_array($job['state'],array('pending','retry'),true) || $job['next']>$now) { return $job['state']; }
+        if (($job['protocol'] ?? null) !== 3 || !is_int($job['attempts'] ?? null) || $job['attempts'] < 0) {
+            return $this->change($id,$snapshot,$job,'needs_review','unproven_send_budget') ? 'needs_review' : 'busy';
+        }
         if ($job['attempts']>=self::MAX_ATTEMPTS) {
             $this->change($id,$snapshot,$job,'failed','attempt_limit'); return 'failed';
         }
         if (!$eligible($id,$job)) {
             $this->change($id,$snapshot,$job,'failed','saved_record_changed'); return 'failed';
         }
-        $job['attempts']++; $job['lease']=$now+self::LEASE;
+        $job['lease']=$now+self::LEASE;
         if (!$this->change($id,$snapshot,$job,'claimed','claimed')) { return 'busy'; }
         // Every transition has a fence. A paused old worker cannot send after a new claim.
         $beforeSend=function() use($id,&$snapshot,$eligible): bool {
             if (!$eligible($id,$snapshot['job'])) { return false; }
             $j=$snapshot['job'];
-            if ($j['lease']<=($this->clock)()) { return false; }
+            if ($j['lease']<=($this->clock)() || $j['attempts']>=self::MAX_ATTEMPTS) { return false; }
+            // Reserve exactly one POST in the same CAS that grants this worker permission.
+            $j['attempts']++;
             return $this->change($id,$snapshot,$j,'sending','send_started');
         };
         $after401=function() use($id,&$snapshot): bool {
+            if ($snapshot['job']['attempts'] >= self::MAX_ATTEMPTS) {
+                $this->change($id,$snapshot,$snapshot['job'],'failed','attempt_limit');
+                return false;
+            }
             return $this->change($id,$snapshot,$snapshot['job'],'claimed','send_rejected_401');
         };
         try { $result=$transport->deliver($snapshot['job'],$beforeSend,$after401); }
         catch (Malendo_Notification_DB_Error $error) {
-            // A pre-POST eligibility read failed. Preserve the job and its send budget.
+            // claimed can also follow a rejected POST. Never refund a persisted reservation.
             if ($snapshot['job']['state'] === 'claimed') {
                 $job = $snapshot['job'];
-                $job['attempts']--;
                 $job['lease'] = 0;
                 $job['next'] = ($this->clock)() + 60;
                 $this->change($id, $snapshot, $job, 'retry', 'db_read_deferred');
@@ -142,11 +152,14 @@ final class Malendo_Outbox {
         }
         catch (Throwable $e) { $result=array('state'=>$snapshot['job']['state']==='sending'?'unknown_delivery':'retry','code'=>'transport_exception'); }
         $job=$snapshot['job'];
-        if (($result['state'] ?? '')==='lost') { return 'busy'; }
+        if (($result['state'] ?? '')==='lost') { return $job['state']==='failed' ? 'failed' : 'busy'; }
         $state=$result['state']; $code=$result['code'];
         if ($state==='retry') {
-            if ($job['attempts']>=self::MAX_ATTEMPTS) { $state='failed'; $code='attempt_limit'; }
-            else { $job['next']=($this->clock)()+max(60*(2**($job['attempts']-1))+($this->jitter)(), (int)($result['retry_after']??0)); }
+            // Token acquisition can fail without any send. Bound those retries separately.
+            if ($job['state']==='claimed') { $job['pre_send_failures']=1+($job['pre_send_failures']??0); }
+            $used=max($job['attempts'], $job['pre_send_failures']??0);
+            if ($used>=self::MAX_ATTEMPTS) { $state='failed'; $code='attempt_limit'; }
+            else { $job['next']=($this->clock)()+max(60*(2**($used-1))+($this->jitter)(), (int)($result['retry_after']??0)); }
         }
         if ($state==='accepted') { $job['message_id']=$result['message_id']; }
         $job['lease']=0;
@@ -324,29 +337,68 @@ function malendo_form_snapshot(int $id): array|false|null {
     catch (Malendo_Notification_DB_Error $e) { return malendo_lead_snapshot($id); }
 }
 
+/** First writer wins in the unique option_name index. A hold and a confirmation cannot coexist. */
+function malendo_claim_confirmation(int $id, string $value): bool {
+    global $wpdb;
+    return malendo_checked_query($wpdb->query($wpdb->prepare(
+        "INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')",
+        MALENDO_CONFIRM_PREFIX.$id, $value
+    ))) === 1;
+}
+
+function malendo_publish_confirmation(int $id, string $prepared): bool {
+    $digest = hash('sha256', $prepared);
+    try {
+        if (malendo_claim_confirmation($id, $digest)) { return true; }
+    } catch (Malendo_Notification_DB_Error $e) { /* The INSERT may already have committed. */ }
+    try {
+        // Fence a late confirmation before reporting failure. Never undo a committed one.
+        if (!malendo_claim_confirmation($id, 'hold')) {
+            $winner = malendo_notification_option_raw(MALENDO_CONFIRM_PREFIX.$id);
+            if ($winner === $digest) { return true; }
+            if ($winner !== 'hold') { throw new Malendo_Confirmation_Unresolved(); }
+        }
+    } catch (Malendo_Notification_DB_Error $e) {
+        throw new Malendo_Confirmation_Unresolved();
+    }
+    throw new Malendo_Notification_DB_Error('confirmation_held');
+}
+
 function malendo_lead_saved_marker(int $id, array $expected, ?array $activation, bool $qa, ?string $review=null): bool {
     $snapshot = malendo_form_snapshot($id);
     if (!is_array($snapshot)) { return false; }
+    $existing = $snapshot['saved_v1'] ?? null;
     unset($snapshot['saved_v1']);
     if (count($snapshot) !== count(malendo_lead_fields()) || count($expected) !== count($snapshot)) { return false; }
     foreach ($expected as $key=>$value) {
         if (($snapshot[$key] ?? null) !== $value) { return false; }
     }
+    if ($existing !== null) {
+        // Idempotent read only. Never promote a legacy marker or another request's preparation.
+        $stored = json_decode($existing,true);
+        return ($stored['phase'] ?? null) === 'prepared' && ($stored['hash'] ?? null) === malendo_lead_fields_hash($expected)
+            && malendo_notification_option_raw(MALENDO_CONFIRM_PREFIX.$id) === hash('sha256',$existing);
+    }
     $candidate = $id > MALENDO_LAST_HISTORICAL_LEAD && !$qa;
     $marker = [
-        'hash'=>malendo_lead_fields_hash($expected),
-        'eligible'=>$candidate && $activation !== null && $id > $activation['after_id'],
+        'phase'=>'prepared', 'nonce'=>bin2hex(random_bytes(16)), 'hash'=>malendo_lead_fields_hash($expected),
+        // A prepared marker never contains the old worker's eligible=true permission.
+        'intent'=>$candidate && $activation !== null && $id > $activation['after_id'],
         'generation'=>$activation['generation'] ?? '', 'qa'=>$qa, 'saved_at'=>time(), 'service'=>$expected['service']
     ];
     if ($review !== null && $candidate) {
-        $marker['eligible'] = null;
+        $marker['intent'] = null;
         $marker['review'] = $review; // Never infer the generation of an in-flight submission later.
     }
     $raw = json_encode($marker, JSON_THROW_ON_ERROR);
-    update_post_meta($id, '_malendo_saved_v1', wp_slash($raw));
+    add_post_meta($id, '_malendo_saved_v1', wp_slash($raw), true);
     global $wpdb;
     if ($wpdb->last_error !== '') { throw new Malendo_Notification_DB_Error('marker_write_failed'); }
-    return (malendo_form_snapshot($id)['saved_v1'] ?? null) === $raw;
+    $verified = malendo_form_snapshot($id);
+    if (!is_array($verified) || ($verified['saved_v1'] ?? null) !== $raw) { return false; }
+    unset($verified['saved_v1']);
+    if (malendo_lead_fields_hash($verified) !== $marker['hash']) { return false; }
+    return malendo_publish_confirmation($id, $raw);
 }
 
 /** Confirmed absence, damaged data and read failures have separate outcomes. */
@@ -356,14 +408,20 @@ function malendo_notification_decision(int $id): array {
     if ($fields === null || (is_array($fields) && !isset($fields['saved_v1']))) { return ['state'=>'excluded']; }
     $damaged = ['state'=>'attention', 'code'=>'saved_record_changed'];
     if ($fields === false) { return $damaged; }
-    $marker = json_decode($fields['saved_v1'], true);
+    $prepared = $fields['saved_v1'];
+    $marker = json_decode($prepared, true);
     unset($fields['saved_v1']);
     if (!is_array($marker) || !is_bool($marker['qa'] ?? null)) { return $damaged; }
-    if ($marker['qa'] || ($marker['eligible'] ?? null) === false) { return ['state'=>'excluded']; }
+    if ($marker['qa'] || ($marker['intent'] ?? null) === false) { return ['state'=>'excluded']; }
+    if (($marker['phase'] ?? null) !== 'prepared') { return ['state'=>'excluded']; }
+    $proof = malendo_notification_option_raw(MALENDO_CONFIRM_PREFIX.$id);
+    if ($proof === null) { return ['state'=>'excluded']; }
+    if ($proof === 'hold') { return ['state'=>'attention','code'=>'confirmation_held']; }
+    if ($proof !== hash('sha256',$prepared)) { return $damaged; }
     if (in_array($marker['review'] ?? null, ['activation_read_unknown','activation_invalid'], true)) {
         return ['state'=>'attention', 'code'=>$marker['review']];
     }
-    if (($marker['eligible'] ?? null) !== true || !is_string($marker['hash'] ?? null)
+    if (($marker['intent'] ?? null) !== true || !is_string($marker['hash'] ?? null)
         || !is_int($marker['saved_at'] ?? null) || count($fields) !== count(malendo_lead_fields())
         || !hash_equals($marker['hash'], malendo_lead_fields_hash($fields))
         || ($marker['service'] ?? null) !== $fields['service']) { return $damaged; }
@@ -372,6 +430,7 @@ function malendo_notification_decision(int $id): array {
     if (!$activation || ($marker['generation'] ?? null) !== $activation['generation'] || $id <= $activation['after_id']) {
         return ['state'=>'attention','code'=>'generation_unproven'];
     }
+    $marker['eligible'] = true; // Computed permission, never persisted on the preparation.
     return ['state'=>'ready', 'marker'=>$marker];
 }
 
@@ -397,11 +456,12 @@ function malendo_notifications_reconcile(int $limit=50): void {
     global $wpdb;
     $ids = malendo_checked_query($wpdb->get_col($wpdb->prepare(
         "SELECT DISTINCT m.post_id FROM {$wpdb->postmeta} m JOIN {$wpdb->posts} p
-         ON p.ID=m.post_id AND p.post_type='malendo_lead' AND p.post_status='private' LEFT JOIN {$wpdb->options} o
+         ON p.ID=m.post_id AND p.post_type='malendo_lead' AND p.post_status='private'
+         JOIN {$wpdb->options} c ON c.option_name=CONCAT(%s,m.post_id) LEFT JOIN {$wpdb->options} o
          ON o.option_name=CONCAT(%s,m.post_id) WHERE m.post_id>%d AND m.meta_key='_malendo_saved_v1'
          AND (m.meta_value LIKE %s OR m.meta_value LIKE %s) AND o.option_id IS NULL
-         ORDER BY m.post_id LIMIT %d", Malendo_WP_Outbox::PREFIX, MALENDO_LAST_HISTORICAL_LEAD,
-         '%"eligible":true%', '%"review":%', max(1,min(50,$limit))
+         ORDER BY m.post_id LIMIT %d", MALENDO_CONFIRM_PREFIX, Malendo_WP_Outbox::PREFIX, MALENDO_LAST_HISTORICAL_LEAD,
+         '%"intent":true%', '%"review":%', max(1,min(50,$limit))
     )));
     foreach ($ids as $id) { malendo_recover_notification((int)$id); }
 }
@@ -458,7 +518,10 @@ add_action('add_meta_boxes_malendo_lead',static function(): void {
         if (!malendo_notification_owner()) { return; }
         $error=get_post_meta($post->ID,'_malendo_save_error',true);
         $marker=get_post_meta($post->ID,'_malendo_saved_v1',true);
-        echo '<p>'.esc_html($error ? 'Incomplete save: '.$error : ($marker ? 'Completion marker recorded.' : 'Completion unverified: legacy or interrupted record; owner review required.')).'</p>';
+        try {
+            $confirmed = is_string($marker) && $marker !== '' && malendo_notification_option_raw(MALENDO_CONFIRM_PREFIX.(int)$post->ID) === hash('sha256',$marker);
+        } catch (Malendo_Notification_DB_Error $e) { $confirmed = false; }
+        echo '<p>'.esc_html($error ? 'Incomplete save: '.$error : ($confirmed ? 'Completion marker recorded and confirmed.' : 'Completion unverified: legacy or interrupted record; owner review required.')).'</p>';
         try{$s=(new Malendo_WP_Outbox())->read((int)$post->ID);echo '<p>'.esc_html($s ? $s['job']['state'].' / '.$s['job']['code'] : 'No notification queue entry.').'</p>';}
         catch(Throwable $e){echo '<p>Outbox read failed; owner review required.</p>';}
     },'malendo_lead','side','high');

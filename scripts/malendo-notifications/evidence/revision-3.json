@@ -1,0 +1,136 @@
+{
+  "revision": 3,
+  "parent": "449a2da457f821af07395051a79acfcd3053fe52",
+  "accepted_base": "89f0cce42817437b58293ad52d2616b1e6741261",
+  "branch": "codex/malendo-gmail-notifications",
+  "transport_default": "disabled",
+  "red_on_parent": {
+    "php_passed": 86,
+    "php_total": 88,
+    "failures": {
+      "p0_form_worker_between_marker_and_both_failed_reads": "FAIL: posts=1 state=accepted",
+      "p0_seven_workers_401_then_db_read_budget": "FAIL: POSTs=7 attempts=0,0,0,0,0,0,0 state=retry"
+    }
+  },
+  "candidate": {
+    "runtime": "PHP 8.3.6",
+    "lint_passed": 13,
+    "lint_total": 13,
+    "php_passed": 103,
+    "php_total": 103,
+    "original_suite_passed": 86,
+    "new_tests": {
+      "p0_form_worker_between_marker_and_both_failed_reads": "PASS",
+      "p0_seven_workers_401_then_db_read_budget": "PASS",
+      "p0_form_crash_prepared": "PASS",
+      "p0_form_crash_confirmed": "PASS",
+      "p0_failed_proof_insert_is_fenced_before_form_error": "PASS",
+      "p0_lost_ack_after_worker_accepted_resolves_to_success": "PASS",
+      "p0_unreadable_final_outcome_written": "PASS",
+      "p0_unreadable_final_outcome_absent": "PASS",
+      "p0_stale_permission_legacy_marker": "PASS",
+      "p0_stale_permission_changed_proof": "PASS",
+      "p0_stale_permission_old_job": "PASS",
+      "p0_stale_permission_bad_counter": "PASS",
+      "p0_stale_permission_change_during_token": "PASS",
+      "p0_refresh_reserves_its_own_post_before_http": "PASS",
+      "p0_reservation_ack_lost_no_post_after_expiry": "PASS",
+      "p0_token_failures_bounded_separately_from_post_budget": "PASS",
+      "p0_401_second_worker_and_wp_snapshot_error": "PASS"
+    },
+    "js": {
+      "runtime": "v24.22.1",
+      "tests": {
+        "no_tag_{}": "PASS",
+        "no_tag_{\"choice\":\"deny\"}": "PASS",
+        "no_tag_{\"choice\":\"allow\",\"qa\":true}": "PASS",
+        "no_tag_{\"choice\":\"allow\",\"host\":\"example.invalid\"}": "PASS",
+        "allow_one_tag_and_page_view": "PASS",
+        "saved_receipt_once_even_repeated_allow": "PASS",
+        "no_receipt_no_conversion": "PASS",
+        "query_hash_referrer_pii_removed": "PASS",
+        "deny_then_allow_and_withdraw": "PASS",
+        "form_start_deduplicated_and_contacts_whitelisted": "PASS"
+      },
+      "passed": 10,
+      "total": 10,
+      "network_requests": 0
+    },
+    "disabled_cli": {
+      "exit": 0,
+      "status": "disabled",
+      "network_requests": 0
+    },
+    "observations": {
+      "interleaved_form_error": {
+        "private_record_retained": true,
+        "required_fields_retained": 8,
+        "state": "needs_review",
+        "success_receipt": false,
+        "send_posts": 0,
+        "subsequent_worker_runs": 3
+      },
+      "unauthorized_then_db_error": {
+        "worker_runs": 7,
+        "send_posts": 5,
+        "persisted_attempts": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          5,
+          5
+        ],
+        "state": "failed",
+        "code": "attempt_limit"
+      },
+      "post_counter_on_401_then_accepted": [
+        1,
+        2
+      ],
+      "lost_reservation_ack": {
+        "state_after_expiry": "unknown_delivery",
+        "send_posts": 0
+      },
+      "crash_before_confirmation_posts": 0,
+      "crash_after_confirmation_posts": 1
+    }
+  },
+  "methods": {
+    "PHP": "Existing Malendo synthetic fixture copied to private RAM. unshare --net, PHP -n, open_basedir and disabled socket/shell functions. No production WordPress bootstrap. Concurrent children use a file CAS; WP option/meta adapter uses synthetic data.",
+    "JS": "Published analytics harness in a Node VM. A syscall filter denied sockets before process startup; verified EPERM. No Google HTTP requests.",
+    "core_logger": "WordPress wpdb::print_error",
+    "core_sha256": "e15403e90032dd0508811301505e491d4212de5152581a98f51b744a1a3903bd",
+    "sql_canary_in_stderr": false,
+    "native_wordpress_mariadb": "NOT RUN: no independent database",
+    "real_forms": 0,
+    "real_gmail_requests": 0,
+    "oauth_grants": 0
+  },
+  "production_read_only": {
+    "start_utc": "2026-11-04T09:27:10.192102+00:00",
+    "after_tests_utc": "2026-11-04T09:33:45.236532+00:00",
+    "host": "malendo-web-prod-01",
+    "contact_http": 200,
+    "active_theme": "malendo-recovery",
+    "baseline_sha256_match": "12/12 at both snapshots",
+    "all_private_leads": [
+      52,
+      56,
+      57
+    ],
+    "new_leads": 0,
+    "notification_options": 0,
+    "worker_present": false,
+    "systemd_units": 0
+  },
+  "tested_sha256": {
+    "wp-content/themes/malendo-recovery/inc-leads.php": "3421e96eb948e579bc690afe7fb98f7f3a989e66d14e6dba07e762f2baffb217",
+    "wp-content/themes/malendo-recovery/inc-notifications.php": "fccc8fc667d519352c41afd5fa39627c1265b5d7ac1b07041503175945794f4a",
+    "scripts/malendo-notifications/tests.php": "6c2a4efe5d82213a6913730faedf5c1fb837b6471b22d01b6d6173d80a8e204a",
+    "scripts/malendo-notifications/worker.php": "2e9ce30fbf086d88cc320e9d053443ca0cba399ee303789aff08e5777d4b5ed8",
+    "scripts/malendo-notifications/analytics-tests.mjs": "bc13ac15a3b06a75fd1b87bed7585d67ee458c791cb0eb2f62b0c9b5c9ed8122",
+    "wp-content/themes/malendo-recovery/analytics.js": "ffcdf67956d5cd41791c7e9186c76bd652befc362e636072651a29c4059ba0d0"
+  }
+}

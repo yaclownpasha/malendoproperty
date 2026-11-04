@@ -124,6 +124,11 @@ function malendo_recovery_receive_lead(): void {
     try {
         $saved = malendo_store_enquiry_fields((int)$id, $fields)
             && malendo_lead_saved_marker((int)$id, $fields, $activation, $qa, $review);
+    } catch (Malendo_Confirmation_Unresolved $e) {
+        // Fields and preparation were verified. The confirmation write may have committed.
+        // Do not replace the winner, fire a success hook or ask the visitor to submit twice.
+        error_log('Malendo confirmation unresolved; enquiry ID ' . (int)$id);
+        malendo_recovery_redirect_form('confirmation_pending');
     } catch (Malendo_Notification_DB_Error $e) {
         $saved = false;
         $saveError = 'save_verification_unavailable';
@@ -149,6 +154,9 @@ add_shortcode('malendo_contact_form', static function (): string {
     ob_start();
     if ($submitted) {
         echo malendo_text('<div class="form-message form-success" role="status"><strong>Enquiry received.</strong> Your message has been saved for review by Malendo Property. For urgent requests, use WhatsApp.</div>','<div class="form-message form-success" role="status"><strong>Запрос получен.</strong> Сообщение сохранено для рассмотрения Malendo Property. По срочным вопросам используйте WhatsApp.</div>');
+    } elseif ($error === 'confirmation_pending') {
+        echo malendo_text('<div class="form-message" role="status">Your details were saved. Confirmation is pending. Please do not submit again. For urgent requests, use WhatsApp.</div>',
+            '<div class="form-message" role="status">Данные сохранены. Подтверждение ожидается. Повторно отправлять форму не нужно. По срочным вопросам используйте WhatsApp.</div>');
     } elseif ($error !== '') {
         echo malendo_text('<div class="form-message form-error" role="alert">Your enquiry was not submitted. Check required fields, consent and email format, then try again. For urgent requests, use WhatsApp.</div>','<div class="form-message form-error" role="alert">Запрос не отправлен. Проверьте обязательные поля, согласие и email, затем повторите попытку. По срочным вопросам используйте WhatsApp.</div>');
     }
