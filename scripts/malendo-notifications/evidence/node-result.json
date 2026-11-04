@@ -1,22 +1,18 @@
 {
-  "command": "node scripts/malendo-notifications/analytics-tests.mjs",
-  "runtime": "v26.13.0",
+  "runtime": "v24.22.1",
+  "tests": {
+    "no_tag_{}": "PASS",
+    "no_tag_{\"choice\":\"deny\"}": "PASS",
+    "no_tag_{\"choice\":\"allow\",\"qa\":true}": "PASS",
+    "no_tag_{\"choice\":\"allow\",\"host\":\"example.invalid\"}": "PASS",
+    "allow_one_tag_and_page_view": "PASS",
+    "saved_receipt_once_even_repeated_allow": "PASS",
+    "no_receipt_no_conversion": "PASS",
+    "query_hash_referrer_pii_removed": "PASS",
+    "deny_then_allow_and_withdraw": "PASS",
+    "form_start_deduplicated_and_contacts_whitelisted": "PASS"
+  },
   "passed": 10,
   "total": 10,
-  "network_requests": 0,
-  "actual_execution": "Performed before final PHP run; unchanged JS harness/source not rerun",
-  "harness_sha256": "bc13ac15a3b06a75fd1b87bed7585d67ee458c791cb0eb2f62b0c9b5c9ed8122",
-  "analytics_sha256": "ffcdf67956d5cd41791c7e9186c76bd652befc362e636072651a29c4059ba0d0",
-  "cases": [
-    "no choice: no tag",
-    "deny: no tag",
-    "QA: no tag",
-    "foreign host: no tag",
-    "allow: one tag/page_view",
-    "receipt once on repeated allow",
-    "no receipt: no conversion",
-    "query/hash/referrer privacy",
-    "deny/allow/withdraw",
-    "form_start dedup/contact whitelist"
-  ]
+  "network_requests": 0
 }

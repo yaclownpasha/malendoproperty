@@ -34,6 +34,30 @@ function malendo_recovery_redirect_form(string $state): void {
 
 add_action('admin_post_nopriv_malendo_lead_submit', 'malendo_recovery_receive_lead');
 add_action('admin_post_malendo_lead_submit', 'malendo_recovery_receive_lead');
+/** wpdb can log its full SQL on a failed meta write. Scope suppression to this batch. */
+function malendo_store_enquiry_fields(int $id, array $fields): bool {
+    global $wpdb, $EZSQL_ERROR;
+    $previous = $wpdb->suppress_errors(true);
+    $errorCount = is_array($EZSQL_ERROR) ? count($EZSQL_ERROR) : 0;
+    $queryCount = count($wpdb->queries ?? []);
+    $ok = true;
+    try {
+        foreach ($fields as $key=>$value) {
+            update_post_meta($id, '_malendo_'.$key, wp_slash($value));
+            // False alone may mean unchanged. Read-back below is still required.
+            if ($wpdb->last_error !== '') { $ok = false; }
+        }
+    } catch (Throwable $e) {
+        $ok = false;
+    } finally {
+        $wpdb->suppress_errors($previous);
+        // Core retains raw statements for EZSQL_ERROR and optional SAVEQUERIES.
+        if (is_array($EZSQL_ERROR)) { $EZSQL_ERROR = array_slice($EZSQL_ERROR, 0, $errorCount); }
+        if (isset($wpdb->queries)) { $wpdb->queries = array_slice($wpdb->queries, 0, $queryCount); }
+    }
+    return $ok;
+}
+
 function malendo_recovery_receive_lead(): void {
     if (!isset($_SERVER['REQUEST_METHOD']) || $_SERVER['REQUEST_METHOD'] !== 'POST') {
         status_header(405);
@@ -75,7 +99,11 @@ function malendo_recovery_receive_lead(): void {
         malendo_recovery_redirect_form('rate');
     }
     // Capture the activation generation before insertion; never backfill old enquiries.
-    $activation = malendo_notification_activation();
+    $review = null;
+    $activation = null;
+    try { $activation = malendo_notification_activation(); }
+    catch (Malendo_Notification_DB_Error $e) { $review = 'activation_read_unknown'; }
+    catch (Malendo_Notification_Activation_Invalid $e) { $review = 'activation_invalid'; }
     $qa = !empty($_POST['_malendo_qa']) || isset($_GET['malendo_qa']);
     $title = sprintf('Enquiry %s — %s', current_time('Y-m-d H:i'), $service);
     $id = wp_insert_post(array(
@@ -92,13 +120,20 @@ function malendo_recovery_receive_lead(): void {
                    'landing' => home_url((isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? '/ru/contact/' : '/contact/'),
                    'locale' => (isset($_POST['_malendo_locale']) && $_POST['_malendo_locale'] === 'ru') ? 'ru' : 'en',
                    'consented_at' => current_time('mysql', true));
-    foreach ($fields as $key => $value) {
-        update_post_meta($id, '_malendo_' . $key, wp_slash($value));
+    $saveError = 'required_fields_or_marker';
+    try {
+        $saved = malendo_store_enquiry_fields((int)$id, $fields)
+            && malendo_lead_saved_marker((int)$id, $fields, $activation, $qa, $review);
+    } catch (Malendo_Notification_DB_Error $e) {
+        $saved = false;
+        $saveError = 'save_verification_unavailable';
+        if (!$qa && $id > MALENDO_LAST_HISTORICAL_LEAD) {
+            try { (new Malendo_Outbox(new Malendo_WP_Outbox()))->recordAttention((int)$id, $saveError); }
+            catch (Malendo_Notification_DB_Error $ignored) { /* Also flag the preserved record below. */ }
+        }
     }
-    // update_post_meta(false) can mean unchanged, so verify exact read-back instead.
-    // The final durable marker closes the save/enqueue crash gap for reconciliation.
-    if (!malendo_lead_saved_marker((int)$id, $fields, $activation, $qa)) {
-        update_post_meta($id, '_malendo_save_error', 'required_fields_or_marker');
+    if (!$saved) {
+        update_post_meta($id, '_malendo_save_error', $saveError);
         error_log('Malendo incomplete enquiry save; ID ' . (int)$id);
         malendo_recovery_redirect_form('server');
     }

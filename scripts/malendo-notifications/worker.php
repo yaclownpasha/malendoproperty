@@ -34,11 +34,15 @@ try{
     $correctSite=true;
     if($activate!==null){
         global $wpdb;
-        $max=(int)$wpdb->get_var("SELECT MAX(ID) FROM {$wpdb->posts}");
-        if($activate<56 || $activate!==$max || get_option('malendo_notify_activation_v1',null)!==null){throw new RuntimeException('activation_refused');}
+        $max=(int)malendo_checked_query($wpdb->get_var("SELECT MAX(ID) FROM {$wpdb->posts}"));
+        if($activate < MALENDO_LAST_HISTORICAL_LEAD || $activate!==$max || malendo_notification_activation()!==null){throw new RuntimeException('activation_refused');}
         // Immutable generation. Never reset on code rollback or deploy.
         $a=array('after_id'=>$max,'generation'=>bin2hex(random_bytes(16)),'activated_at'=>time());
-        if(!add_option('malendo_notify_activation_v1',$a,'',false) || get_option('malendo_notify_activation_v1')!==$a){throw new RuntimeException('activation_failed');}
+        $inserted = malendo_checked_query($wpdb->query($wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')",
+            'malendo_notify_activation_v1', serialize($a)
+        )));
+        if ($inserted !== 1 || malendo_notification_activation() !== $a) { throw new RuntimeException('activation_failed'); }
         echo "{\"status\":\"activated\"}\n";
     }else{
         update_option('malendo_notify_worker_v1',array('time'=>time(),'status'=>'running'),false);

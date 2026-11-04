@@ -1,7 +1,17 @@
 <?php
 /** Synthetic-only: no WordPress bootstrap, DB connection, curl or real HTTP. */
 declare(strict_types=1);
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 define('ABSPATH',__DIR__.'/synthetic-webroot/');
+if (getenv('MALENDO_TEST_WPDB_CORE')) {
+    require getenv('MALENDO_TEST_WPDB_CORE');
+    class QA_Core_Logger extends wpdb {
+        public function __construct() {}
+        public function get_caller() { return 'synthetic_meta_fault'; }
+    }
+}
+if (!defined('ARRAY_A')) { define('ARRAY_A', 'ARRAY_A'); }
+function is_serialized($v) { return is_string($v) && preg_match('/^[asOibd]:|^N;$/D',$v); }
 ob_start();
 $GLOBALS['actions']=array(); $GLOBALS['shortcodes']=array();
 function add_action($hook,$callback,$priority=10,$args=1){$GLOBALS['actions'][$hook][$priority][]=$callback;}
@@ -11,7 +21,11 @@ function do_action($hook,...$args){$a=$GLOBALS['actions'][$hook]??array();ksort(
 function get_option($name,$default=false){return $GLOBALS['options'][$name]??$default;}
 function get_post_meta($id,$key,$single=true){return $GLOBALS['meta'][$id][$key]??'';}
 function metadata_exists($type,$id,$key){return array_key_exists($key,$GLOBALS['meta'][$id]??array());}
-function update_post_meta($id,$key,$value){if($key===($GLOBALS['fail_meta']??'')){return false;}$value=is_string($value)?stripslashes($value):$value;$same=metadata_exists('post',$id,$key)&&$GLOBALS['meta'][$id][$key]===$value;$GLOBALS['meta'][$id][$key]=$value;return !$same;}
+function update_post_meta($id,$key,$value){$db=$GLOBALS['wpdb'];$db->last_error='';
+    if($key===($GLOBALS['fail_meta']??'')){
+        if (!empty($GLOBALS['sql_canary'])) { $db->metaError($value); }
+        return false;
+    }$value=is_string($value)?stripslashes($value):$value;$same=metadata_exists('post',$id,$key)&&$GLOBALS['meta'][$id][$key]===$value;$GLOBALS['meta'][$id][$key]=$value;return !$same;}
 function wp_slash($s){return addslashes($s);}
 function wp_cache_delete(...$args){}
 function get_post_type($id){return $GLOBALS['posts'][$id]['post_type']??false;}
@@ -29,7 +43,12 @@ function wp_salt($which){return 'synthetic-salt';}
 function get_transient($key){return false;}
 function set_transient(...$args){}
 function malendo_translation_id($id){return 0;}
-function current_user_can(...$args){return false;}
+function current_user_can(...$args){return $args===['manage_options'] && !empty($GLOBALS['can_manage']);}
+function get_current_user_id(){return $GLOBALS['user_id']??0;}
+function add_submenu_page($parent,$title,$menu,$cap,$slug,$cb){$GLOBALS['queue_page']=$cb;}
+function add_meta_box($id,$title,$cb,...$rest){$GLOBALS['boxes'][$id]=$cb;}
+function esc_html($s){return htmlspecialchars((string)$s);}
+function esc_url($s){return htmlspecialchars((string)$s);}
 function add_query_arg($key,$value,$url){return $url.'?'.$key.'='.$value;}
 class FormRedirect extends RuntimeException {}
 function wp_safe_redirect($url,$status){throw new FormRedirect($url);}
@@ -45,25 +64,70 @@ if(!function_exists('mb_strlen')){function mb_strlen($s){return strlen($s);}}
 // A deliberately limited wpdb fake: checks adapter parameters, never executes SQL.
 final class FakeWPDB {
     public $options='test_options'; public $postmeta='test_postmeta'; public $posts='test_posts'; public $last_error=''; public $outbox=array(); public $sql=array();
+    public $faults=[]; public $suppressed=false; public $queries=[]; public $logger;
+    function __construct(){if(class_exists('QA_Core_Logger')){$this->logger=new QA_Core_Logger();}}
+    function suppress_errors($new=true){
+        $old=$this->suppressed;$this->suppressed=$new;
+        if($this->logger){$this->logger->suppress_errors($new);}return $old;
+    }
+    function metaError($value){
+        $this->last_error='synthetic_sql_error';$query='INSERT INTO fixture VALUES ('.$value.')';
+        $this->queries[]=[$query];
+        if ($this->logger) {$this->logger->last_query=$query;$this->logger->print_error('injected error');}
+        else {$GLOBALS['EZSQL_ERROR'][]=['query'=>$query];if(!$this->suppressed){error_log($query);}}
+        if(!empty($GLOBALS['throw_write'])){throw new RuntimeException('write_exception');}
+    }
+    function readFault($key){
+        $this->last_error='';
+        if(($this->faults[$key]??0)<1){return false;}
+        $this->faults[$key]--;$this->last_error='transient_failure';return true;
+    }
+    function get_results($q,$mode){
+        [$sql,$args]=$q;$id=array_pop($args);
+        if(!str_contains($sql,'p.post_type,p.post_status,m.meta_key,m.meta_value')){throw new RuntimeException('unexpected snapshot');}
+        if($this->readFault('snapshot')){return [];}
+        if(isset($GLOBALS['meta'][$id]['_malendo_saved_v1']) && $this->readFault('marker_snapshot')){return [];}
+        if(!isset($GLOBALS['posts'][$id])){return [];}
+        $post=$GLOBALS['posts'][$id];$result=[];
+        foreach($args as $key){if(array_key_exists($key,$GLOBALS['meta'][$id]??[])){
+            $v=$GLOBALS['meta'][$id][$key];$result[]=$post+['meta_key'=>$key,'meta_value'=>is_serialized($v)?serialize($v):$v];
+        }}
+        return $result?:[$post+['meta_key'=>null,'meta_value'=>null]];
+    }
     function prepare($sql,...$args){return array($sql,$args);}
     function esc_like($s){return addcslashes($s,'_%\\');}
+    function get_row($q,$mode){
+        $value=$this->get_var($q);
+        return $value===null?null:['option_value'=>$value];
+    }
     function get_var($q){[$sql,$a]=$q;$this->sql[]=$sql;
-        if(str_contains($sql,'option_value')){return $this->outbox[$a[0]]??null;}
+        if(str_contains($sql,'option_value')){
+            if($a[0]==='malendo_notify_activation_v1'){
+                if($this->readFault('activation')){return null;}
+                if(isset($GLOBALS['activation_raw'])){return $GLOBALS['activation_raw'];}
+                return isset($GLOBALS['options'][$a[0]])?serialize($GLOBALS['options'][$a[0]]):null;
+            }
+            if($this->readFault('outbox_read')){return null;}
+            return $this->outbox[$a[0]]??null;
+        }
         foreach($GLOBALS['meta'] as $id=>$m){if(($m['_malendo_analytics_receipt']??'')===$a[0]){return $id;}}return null;
     }
     function query($q){[$sql,$a]=$q;$this->sql[]=$sql;
-        if(str_starts_with($sql,'INSERT IGNORE')){if(isset($this->outbox[$a[0]])){return 0;}$this->outbox[$a[0]]=$a[1];return 1;}
-        if(str_contains($sql,'BINARY option_value')){if(($this->outbox[$a[1]]??null)!==$a[2]){return 0;}$this->outbox[$a[1]]=$a[0];return 1;}
+        if(str_starts_with($sql,'INSERT IGNORE')){if($this->readFault('insert')){return false;}if(isset($this->outbox[$a[0]])){return 0;}$this->outbox[$a[0]]=$a[1];return 1;}
+        if(str_contains($sql,'BINARY option_value')){if($this->readFault('replace')){return false;}if(($this->outbox[$a[1]]??null)!==$a[2]){return 0;}$this->outbox[$a[1]]=$a[0];return 1;}
         if(str_contains($sql,"SET meta_value = 'consumed'")){[$id,$hash]=$a;if(($GLOBALS['meta'][$id]['_malendo_analytics_receipt']??null)!==$hash){return 0;}$GLOBALS['meta'][$id]['_malendo_analytics_receipt']='consumed';return 1;}
         throw new RuntimeException('Unexpected synthetic SQL');
     }
     function get_col($q){[$sql,$a]=$q;$this->sql[]=$sql;
         if(str_contains($sql,'SELECT DISTINCT m.post_id')){
-            $ids=array();foreach($GLOBALS['meta'] as $id=>$m){$ready=json_decode($m['_malendo_saved_v1']??'null',true);if(!empty($ready['eligible'])&&!isset($this->outbox[Malendo_WP_Outbox::PREFIX.$id])){$ids[]=$id;}}return array_slice($ids,0,50);
+            if($this->readFault('reconcile')){return [];}
+            $ids=array();foreach($GLOBALS['meta'] as $id=>$m){$ready=json_decode($m['_malendo_saved_v1']??'null',true);if($id>$a[1] && (!empty($ready['eligible'])||isset($ready['review']))&&!isset($this->outbox[Malendo_WP_Outbox::PREFIX.$id])){$ids[]=$id;}}return array_slice($ids,0,50);
         }
         if(str_contains($sql,'JSON_EXTRACT')){
+            if($this->readFault('due')){return [];}
             $keys=array();foreach($this->outbox as $key=>$raw){$j=json_decode($raw,true);if((in_array($j['state'],array('pending','retry'),true)&&$j['next']<=$a[1])||(in_array($j['state'],array('claimed','sending'),true)&&$j['lease']<=$a[2])){$keys[]=$key;}}return array_slice($keys,0,$a[3]);
         }
+        if(str_contains($sql,'ORDER BY option_id DESC')){return array_reverse(array_values($this->outbox));}
         throw new RuntimeException('Unexpected synthetic query');
     }
 }
@@ -88,6 +152,7 @@ final class FileOutbox implements Malendo_Outbox_Store {
 }
 function check($value,$message='assertion'){if(!$value){throw new RuntimeException($message);}}
 function reset_form():void{
+    unset($GLOBALS['activation_raw']);$GLOBALS['sql_canary']=false;$GLOBALS['throw_write']=false;$GLOBALS['EZSQL_ERROR']=[];
     $GLOBALS['meta']=array();$GLOBALS['posts']=array();$GLOBALS['last_id']=100;$GLOBALS['fail_meta']='';$GLOBALS['insert_fail']=false;
     $GLOBALS['options']=array('malendo_notify_activation_v1'=>array('after_id'=>100,'generation'=>str_repeat('a',32)));
     $GLOBALS['wpdb']=new FakeWPDB();$GLOBALS['admin']=false;$GLOBALS['preview']=false;unset($GLOBALS['malendo_saved_enquiry_event']);
@@ -117,18 +182,18 @@ $tests['consent_deny_still_queues_no_analytics']=static function(){reset_form();
 $tests['qa_saved_without_queue_or_analytics']=static function(){reset_form();$_POST['_malendo_qa']='1';submit();check(!$GLOBALS['wpdb']->outbox);check(!metadata_exists('post',101,'_malendo_analytics_receipt'));};
 foreach(array('admin','preview') as $flag){$tests['analytics_excludes_'.$flag]=static function()use($flag){reset_form();$GLOBALS[$flag]=true;submit();check(!metadata_exists('post',101,'_malendo_analytics_receipt'));};}
 $tests['activation_off_no_backfill']=static function(){reset_form();$GLOBALS['options']=array();submit();check(!$GLOBALS['wpdb']->outbox);$GLOBALS['options']['malendo_notify_activation_v1']=array('after_id'=>100,'generation'=>str_repeat('b',32));malendo_notifications_reconcile();check(!$GLOBALS['wpdb']->outbox);};
-$tests['historical_52_56_untouched']=static function(){reset_form();foreach(array(52,56) as $id){$GLOBALS['posts'][$id]=array('post_type'=>'malendo_lead','post_status'=>'private');$GLOBALS['meta'][$id]=array('synthetic_protected'=>'unchanged');}$before=$GLOBALS['meta'];malendo_queue_saved_lead(52);malendo_queue_saved_lead(56);malendo_notifications_reconcile();check($before===$GLOBALS['meta']&&!$GLOBALS['wpdb']->outbox);};
+$tests['historical_52_56_57_untouched']=static function(){reset_form();foreach(array(52,56,57) as $id){$GLOBALS['posts'][$id]=array('post_type'=>'malendo_lead','post_status'=>'private');$GLOBALS['meta'][$id]=array('synthetic_protected'=>'unchanged');}$before=$GLOBALS['meta'];malendo_queue_saved_lead(52);malendo_queue_saved_lead(56);malendo_queue_saved_lead(57);malendo_notifications_reconcile();check($before===$GLOBALS['meta']&&!$GLOBALS['wpdb']->outbox);};
 $tests['save_enqueue_gap_reconciles_once']=static function(){reset_form();submit();$GLOBALS['wpdb']->outbox=array();malendo_notifications_reconcile();check(count($GLOBALS['wpdb']->outbox)===1);$before=$GLOBALS['wpdb']->outbox;malendo_notifications_reconcile();check($before===$GLOBALS['wpdb']->outbox);};
 $tests['changed_saved_field_stops']=static function(){reset_form();submit();$GLOBALS['meta'][101]['_malendo_service']='Other';check(malendo_notification_ready(101)===null);$calls=array();$t=transport($calls,array());$e=new Malendo_Outbox(new Malendo_WP_Outbox());check($e->tick(101,$t,static fn($id,$j)=>malendo_notification_ready($id)!==null)==='failed');check(!$calls);};
 $tests['analytics_receipt_atomic_one_event_and_forgery']=static function(){reset_form();submit();unset($GLOBALS['malendo_saved_enquiry_event']);$_COOKIE['malendo_lead_receipt']=str_repeat('c',64);$GLOBALS['meta'][101]['_malendo_analytics_receipt']=hash('sha256',$_COOKIE['malendo_lead_receipt']);$GLOBALS['meta'][101]['_malendo_analytics_expires']=time()+300;do_action('template_redirect');check(($GLOBALS['malendo_saved_enquiry_event']['service']??'')==='rental');unset($GLOBALS['malendo_saved_enquiry_event']);do_action('template_redirect');check(!isset($GLOBALS['malendo_saved_enquiry_event']));$_GET['submitted']='1';$_COOKIE['malendo_lead_receipt']=str_repeat('d',64);do_action('template_redirect');check(!isset($GLOBALS['malendo_saved_enquiry_event']));};
 $tests['disabled_zero_requests_and_credential_reads']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$before=$s->rows;$t=new Malendo_Gmail_Transport(false,static function(){throw new RuntimeException('credentials read');},static function(){throw new RuntimeException('network');});check($e->tick(101,$t,static fn()=>true)==='disabled');check($s->rows===$before);};
-foreach(array(429,503) as $status){$tests['bounded_retry_'.$status]=static function()use($status){$now=time();$s=new MemoryOutbox();$e=new Malendo_Outbox($s,static function()use(&$now){return $now;},static fn()=>0);$e->enqueue(101,ready());$calls=array();$responses=array();for($i=0;$i<5;$i++){array_push($responses,token_response(),response($status,array('error'=>array('code'=>$status)),array('retry_after'=>'600')));}$t=transport($calls,$responses);for($i=1;$i<=5;$i++){check($e->tick(101,$t,static fn()=>true)===($i===5?'failed':'retry'));if($i<5){$j=$s->read(101)['job'];check($j['next']>=$now+600);$count=count($calls);$e->tick(101,$t,static fn()=>true);check(count($calls)===$count);$now=$j['next'];}}check(count($calls)===10);};}
+foreach(array(429) as $status){$tests['bounded_retry_'.$status]=static function()use($status){$now=time();$s=new MemoryOutbox();$e=new Malendo_Outbox($s,static function()use(&$now){return $now;},static fn()=>0);$e->enqueue(101,ready());$calls=array();$responses=array();for($i=0;$i<5;$i++){array_push($responses,token_response(),response($status,array('error'=>array('code'=>$status)),array('retry_after'=>'600')));}$t=transport($calls,$responses);for($i=1;$i<=5;$i++){check($e->tick(101,$t,static fn()=>true)===($i===5?'failed':'retry'));if($i<5){$j=$s->read(101)['job'];check($j['next']>=$now+600);$count=count($calls);$e->tick(101,$t,static fn()=>true);check(count($calls)===$count);$now=$j['next'];}}check(count($calls)===10);};}
 $tests['timeout_unknown_no_replay']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),array('status'=>0,'body'=>'','before_send'=>false)));check($e->tick(101,$t,static fn()=>true)==='unknown_delivery');check($e->tick(101,$t,static fn()=>true)==='unknown_delivery');check(count($calls)===2);};
 $tests['connect_failure_before_upload_retry']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),array('status'=>0,'body'=>'','before_send'=>true)));check($e->tick(101,$t,static fn()=>true)==='retry');};
 foreach(array('invalid_grant','wide_scope','missing_scope') as $case){$tests['reauth_'.$case]=static function()use($case){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$r=token_response();if($case==='invalid_grant'){$r=response(400,array('error'=>'invalid_grant'));}else{$r=response(200,array('access_token'=>'synthetic','token_type'=>'Bearer','scope'=>$case==='wide_scope'?Malendo_Gmail_Transport::SCOPE.' https://mail.google.com/':''));}$t=transport($calls,array($r));check($e->tick(101,$t,static fn()=>true)==='needs_reauth');check(count($calls)===1);};}
 $tests['one_401_refresh_then_accepted']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),response(401,array()),token_response(),response(200,array('id'=>'synthetic-id'))));check($e->tick(101,$t,static fn()=>true)==='accepted');check(count($calls)===4);check($e->tick(101,$t,static fn()=>true)==='accepted');check(count($calls)===4);check($s->read(101)['job']['message_id']==='synthetic-id');};
 $tests['repeated_401_stops']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),response(401,array()),token_response(),response(401,array())));check($e->tick(101,$t,static fn()=>true)==='needs_reauth');check(count($calls)===4);};
-$tests['permission_403_needs_reauth']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),response(403,array('error'=>array('code'=>403)))));check($e->tick(101,$t,static fn()=>true)==='needs_reauth');};
+$tests['permission_403_needs_reauth']=static function(){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),response(403,array('error'=>array('code'=>403,'errors'=>array(array('reason'=>'domainPolicy')))))));check($e->tick(101,$t,static fn()=>true)==='needs_reauth');};
 foreach(array(200,502,504) as $status){$tests['ambiguous_response_'.$status]=static function()use($status){$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(token_response(),response($status,array())));check($e->tick(101,$t,static fn()=>true)==='unknown_delivery');};}
 $tests['message_headers_privacy_and_injection']=static function(){$j=ready()+array('id'=>101);$mime=Malendo_Gmail_Transport::mime($j);check(str_contains($mime,"From: malendophuket@gmail.com\r\nTo: acrabash@gmail.com\r\n"));check(!preg_match('/\r\n(?:Cc|Bcc):/i',$mime));preg_match('/Subject: =\?UTF-8\?B\?([^?]+)/',$mime,$m);check(base64_decode($m[1])==='Malendo — New enquiry #101');$body=base64_decode(explode("\r\n\r\n",$mime,2)[1]);check(str_contains($body,'Asia/Bangkok')&&str_contains($body,'post=101&action=edit'));check(!str_contains($body,'fixture@example.invalid')&&!str_contains($body,'SYNTHETIC PERSON'));$j['service']="Rental\r\nBcc: injected@example.invalid";try{Malendo_Gmail_Transport::mime($j);throw new LogicException('injection accepted');}catch(RuntimeException $e){check($e->getMessage()==='message_invalid');}};
 $tests['wpdb_cas_fences_stale_revision']=static function(){reset_form();$s=new Malendo_WP_Outbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$old=$s->read(101);$j=$old['job'];$j['state']='claimed';check($s->replace(101,$old['raw'],$j));check(!$s->replace(101,$old['raw'],$old['job']));check(str_contains(implode('\n',$GLOBALS['wpdb']->sql),'BINARY option_value=BINARY %s'));};
@@ -154,8 +219,163 @@ $tests['sigterm_after_send_no_replay']=static function(){
 };
 $tests['oauth_retry_after_respected']=static function(){$now=time();$s=new MemoryOutbox();$e=new Malendo_Outbox($s);$e->enqueue(101,ready());$calls=array();$t=transport($calls,array(response(429,array(),array('retry_after'=>'3600'))));check($e->tick(101,$t,static fn()=>true)==='retry');check($s->read(101)['job']['next']>=$now+3600);check(count($calls)===1);};
 
+function expect_db_fault(callable $run): void {
+    try { $run(); } catch (Malendo_Notification_DB_Error $e) { return; }
+    throw new RuntimeException('expected a visible database failure');
+}
+$tests['r1_activation_read_unknown_survives_crash_no_backfill']=static function(){
+    reset_form(); $db=$GLOBALS['wpdb']; $db->faults['activation']=1;
+    check(str_contains(submit(),'submitted=1'));
+    $m=json_decode(get_post_meta(101,'_malendo_saved_v1',true),true);
+    check($m['eligible']===null && $m['review']==='activation_read_unknown');
+    $db->outbox=[]; // Crash after completion marker and before enqueue.
+    malendo_notifications_reconcile();
+    $s=new Malendo_WP_Outbox(); $row=$s->read(101);
+    check($row['job']['state']==='needs_review' && $row['job']['code']===$m['review']);
+    $calls=[]; $engine=new Malendo_Outbox($s); $t=transport($calls,[]);
+    for($i=0;$i<2;$i++){check($engine->tick(101,$t,static fn()=>true)==='needs_review');}
+    check(!$calls && $s->read(101)===$row);
+};
+$tests['r1_absent_corrupt_and_unreadable_activation_differ']=static function(){
+    reset_form();$GLOBALS['options']=[];check(malendo_notification_activation()===null);
+    $GLOBALS['options']['malendo_notify_activation_v1']=['generation'=>'corrupt'];
+    check(str_contains(submit(),'submitted=1'));
+    $row=(new Malendo_WP_Outbox())->read(101);check($row['job']['code']==='activation_invalid');
+    $GLOBALS['wpdb']->faults['activation']=1;expect_db_fault('malendo_notification_activation');
+};
+$tests['r1_empty_stored_activation_is_not_off']=static function(){
+    reset_form();$GLOBALS['activation_raw']='';
+    check(str_contains(submit(),'submitted=1'));
+    check((new Malendo_WP_Outbox())->read(101)['job']['code']==='activation_invalid');
+};
+$tests['r1_qa_unknown_activation_is_excluded']=static function(){
+    reset_form();$GLOBALS['wpdb']->faults['activation']=1;$_POST['_malendo_qa']='1';
+    check(str_contains(submit(),'submitted=1'));malendo_notifications_reconcile();check(!$GLOBALS['wpdb']->outbox);
+};
+$tests['r1_history_cannot_enqueue_even_with_forged_eligible_marker']=static function(){
+    reset_form();$q=new Malendo_Outbox(new Malendo_WP_Outbox());
+    foreach([52,56,57] as $id){check(!$q->enqueue($id,ready()));check(malendo_notification_decision($id)['state']==='excluded');}
+    check(!$GLOBALS['wpdb']->outbox);
+};
+$tests['r1_submit_readback_retries_only_select']=static function(){
+    reset_form();$GLOBALS['wpdb']->faults['snapshot']=1;
+    check(str_contains(submit(),'submitted=1'));check(count($GLOBALS['posts'])===1);
+    check((new Malendo_WP_Outbox())->read(101)['job']['state']==='pending');
+};
+$tests['r1_marker_read_failure_retries_without_duplicate_hooks']=static function(){
+    reset_form();$GLOBALS['wpdb']->faults['marker_snapshot']=1;
+    check(str_contains(submit(),'submitted=1'));check(count($GLOBALS['posts'])===1);
+    check(count($GLOBALS['wpdb']->outbox)===1 && (new Malendo_WP_Outbox())->read(101)['job']['state']==='pending');
+};
+$tests['r1_unverified_save_visible_no_false_success']=static function(){
+    reset_form();$GLOBALS['wpdb']->faults['snapshot']=2;
+    check(str_contains(submit(),'form_error=server'));
+    check((new Malendo_WP_Outbox())->read(101)['job']['state']==='needs_review');
+    check(!metadata_exists('post',101,'_malendo_analytics_receipt'));
+};
+foreach(['snapshot','marker_snapshot','activation','insert','outbox_read'] as $fault){
+    $tests['r1_single_fault_'.$fault.'_then_exactly_one_job']=static function()use($fault){
+        reset_form();submit();$db=$GLOBALS['wpdb'];$db->outbox=[];
+        if($fault==='outbox_read'){malendo_notifications_reconcile();}
+        $db->faults[$fault]=1;
+        expect_db_fault($fault==='outbox_read'?static fn()=>(new Malendo_WP_Outbox())->read(101):'malendo_notifications_reconcile');
+        malendo_notifications_reconcile();malendo_notifications_reconcile();
+        check(count($db->outbox)===1 && (new Malendo_WP_Outbox())->read(101)['job']['state']==='pending');
+    };
+}
+foreach(['reconcile','due','snapshot','replace'] as $fault){
+    $tests['r1_worker_propagates_'.$fault.'_and_recovers']=static function()use($fault){
+        reset_form();submit();$db=$GLOBALS['wpdb'];$db->faults[$fault]=1;
+        $calls=[];$t=transport($calls,[token_response(),response(200,['id'=>'winner'])]);
+        expect_db_fault(static fn()=>malendo_notifications_worker($t,1));
+        check(!$calls);check((new Malendo_WP_Outbox())->read(101)['job']['state']==='pending');
+        $out=malendo_notifications_worker($t,1);check($out['results'][101]==='accepted' && count($calls)===2);
+    };
+}
+$tests['r1_second_eligibility_read_does_not_spend_last_attempt']=static function(){
+    reset_form();submit();$s=new Malendo_WP_Outbox();$old=$s->read(101);$j=$old['job'];$j['attempts']=4;$s->replace(101,$old['raw'],$j);
+    $now=time();$e=new Malendo_Outbox($s,static function()use(&$now){return $now;},static fn()=>0);
+    $t=new Malendo_Gmail_Transport(true,'fake_credentials',static function($url){
+        check(str_contains($url,'oauth2'));$GLOBALS['wpdb']->faults['snapshot']=1;return token_response();
+    });
+    $eligible=static fn($id,$job)=>malendo_notification_ready($id)!==null;
+    expect_db_fault(static fn()=>$e->tick(101,$t,$eligible));$row=$s->read(101)['job'];
+    check($row['state']==='retry' && $row['attempts']===4);
+    $now=$row['next'];$calls=[];$t=transport($calls,[token_response(),response(200,['id'=>'winner'])]);
+    check($e->tick(101,$t,$eligible)==='accepted' && count($calls)===2);
+};
+foreach(['rateLimitExceeded','userRateLimitExceeded','domainPolicy','insufficientPermissions','newReason',null] as $reason){
+    $tests['r2_403_'.($reason??'missing')]=static function()use($reason){
+        $now=time();$s=new MemoryOutbox();$e=new Malendo_Outbox($s,static fn()=>$now,static fn()=>0);
+        $e->enqueue(101,ready());$calls=[];
+        $t=transport($calls,[token_response(),response(403,['error'=>['code'=>403,'errors'=>[['reason'=>$reason,'message'=>'PRIVATE-RAW-RESPONSE']]]],['retry_after'=>'510'])]);
+        $status=$e->tick(101,$t,static fn()=>true);
+        $rate=in_array($reason,['rateLimitExceeded','userRateLimitExceeded'],true);
+        $denied=in_array($reason,['domainPolicy','insufficientPermissions'],true);
+        check($status===($rate?'retry':($denied?'needs_reauth':'failed')));
+        $r=$s->read(101);
+        if($rate){check($r['job']['next']>=$now+510);}
+        check(!str_contains($r['raw'],'PRIVATE-RAW-RESPONSE'));$e->tick(101,$t,static fn()=>true);check(count($calls)===2);
+    };
+}
+$tests['r3_accept_then_503_no_second_post_after_restart']=static function(){
+    $now=time();$s=new MemoryOutbox();$clock=static function()use(&$now){return $now;};
+    $q=new Malendo_Outbox($s,$clock);$q->enqueue(101,ready());$posts=0;
+    $t=new Malendo_Gmail_Transport(true,'fake_credentials',static function($url)use(&$posts){
+        if(str_contains($url,'oauth2')){return token_response();}
+        $posts++; // Simulated Gmail accepted this POST before returning its error.
+        return response(503,['error'=>['code'=>503,'errors'=>[['reason'=>'backendError']]]],['retry_after'=>'10']);
+    });
+    check($q->tick(101,$t,static fn()=>true)==='unknown_delivery');
+    foreach([600,86400] as $delta){$now+=$delta;$next=new Malendo_Outbox($s,$clock);check($next->tick(101,$t,static fn()=>true)==='unknown_delivery');}
+    check($posts===1 && $s->read(101)['job']['code']==='gmail_503_outcome_unknown');
+};
+foreach(['name'=>'full_name','email'=>'email','phone'=>'phone','message'=>'message'] as $field=>$input){
+    $tests['r4_log_redaction_'.$field]=static function()use($field,$input){
+        reset_form();$db=$GLOBALS['wpdb'];$GLOBALS['sql_canary']=true;$GLOBALS['fail_meta']='_malendo_'.$field;
+        $canary='PII-CANARY-'.$field.($field==='email'?'@example.invalid':'-SYNTHETIC');
+        $_POST[$input]=$canary;
+        $log=getenv('MALENDO_TEST_TMP').'/private-'.$field.'.log';$old=ini_set('error_log',$log);
+        try {
+            check(str_contains(submit(),'form_error=server'));
+            check(!$db->suppressed && count($GLOBALS['posts'])===1 && !$db->outbox);
+            $logged=file_get_contents($log);
+            check(str_contains($logged,'Malendo incomplete enquiry save; ID 101'));
+            check(!str_contains($logged.json_encode([$GLOBALS['EZSQL_ERROR'],$db->queries,$db->outbox]),$canary));
+        } finally {if($old===''){ini_restore('error_log');}else{ini_set('error_log',$old);}}
+    };
+}
+$tests['r4_finally_restores_both_prior_modes_on_exception']=static function(){
+    foreach([false,true] as $prior){
+        reset_form();$db=$GLOBALS['wpdb'];$db->suppress_errors($prior);
+        $db->queries=[['prior']];$GLOBALS['EZSQL_ERROR']=[['query'=>'prior']];
+        $GLOBALS['sql_canary']=true;$GLOBALS['throw_write']=true;$GLOBALS['fail_meta']='_malendo_phone';
+        check(str_contains(submit(),'form_error=server'));
+        check($db->suppressed===$prior && $db->queries===[['prior']] && $GLOBALS['EZSQL_ERROR']===[['query'=>'prior']]);
+    }
+};
+$tests['r5_owner_capability_registration_direct_callback_and_metabox']=static function(){
+    reset_form();submit();$GLOBALS['user_id']=701;$GLOBALS['can_manage']=true;
+    putenv('MALENDO_NOTIFICATION_OWNER_ID=701');
+    try {
+        do_action('admin_menu');do_action('add_meta_boxes_malendo_lead');
+        $page=$GLOBALS['queue_page'];$box=$GLOBALS['boxes']['malendo_save_status'];
+        ob_start();$page();$box((object)['ID'=>101]);$html=ob_get_clean();
+        check(str_contains($html,'Malendo notifications') && str_contains($html,'Completion marker recorded'));
+        foreach([[702,true,'701'],[701,false,'701'],[701,true,''],[0,true,'0']] as [$uid,$cap,$configured]){
+            $GLOBALS['user_id']=$uid;$GLOBALS['can_manage']=$cap;
+            putenv($configured===''?'MALENDO_NOTIFICATION_OWNER_ID':'MALENDO_NOTIFICATION_OWNER_ID='.$configured);
+            unset($GLOBALS['queue_page'],$GLOBALS['boxes']['malendo_save_status']);
+            do_action('admin_menu');do_action('add_meta_boxes_malendo_lead');
+            check(!isset($GLOBALS['queue_page']) && !isset($GLOBALS['boxes']['malendo_save_status']));
+            ob_start();$page();$box((object)['ID'=>101]);check(ob_get_clean()==='');
+        }
+    } finally {putenv('MALENDO_NOTIFICATION_OWNER_ID');}
+};
+
 $results=array();foreach($tests as $name=>$test){try{$test();$results[$name]='PASS';}catch(Throwable $e){$results[$name]='FAIL: '.$e->getMessage();}}
 ob_end_clean();
 echo json_encode(array('php'=>PHP_VERSION,'tests'=>$results,'passed'=>count(array_filter($results,static fn($r)=>$r==='PASS')),'total'=>count($results),
+    'sql_error_logger'=>class_exists('QA_Core_Logger')?'WordPress wpdb::print_error':'fixture',
     'isolation'=>'Synthetic stubs + file CAS, no native WordPress/MySQL; no HTTP transport invoked'),JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n";
 exit(count(array_filter($results,static fn($r)=>$r!=='PASS'))?1:0);

@@ -6,6 +6,22 @@ Stacked Draft PR: HEAD `codex/malendo-gmail-notifications`, BASE
 The existing workflow has no PR trigger and deploys only legacy-theme/workflow changes
 on main or explicit dispatch. This change touches neither; do not run it.
 
+## Revision 2 · read-only acceptance handoff
+
+The review of `65f081b0d8c148dff696871d3f4705fad65475e4` reproduced R1–R5.
+On the revised PR head, use the checks below. Run the synthetic suite with a mock transport
+and a blocked network. The JSON evidence includes the tested source hashes and individual
+outcomes. [Previous independent review](https://chatgpt.com/library?file_id=libfile_b825340b9bcc8191bd53fb4e1442de90&account_id=personal)
+
+| Case | Expected observation |
+|---|---|
+| R1. Activation cannot be read before insertion | The completed lead gets a durable review marker and a non-dispatchable `needs_review` entry, including after a crash between those writes. Later activation cannot establish the original generation. Confirmed absence still excludes pre-activation submissions. |
+| R1. One-off SELECT fails during reconciliation or worker eligibility | The cycle reports failure. Once reads recover, a valid marked lead reaches one job. The error consumes no send attempt when validation failed before POST. Verify missing/corrupt markers separately. |
+| R2. Gmail returns HTTP 403 | Only whitelisted rate-limit reasons receive bounded backoff with Retry-After. Permission failures require attention; unknown or mixed unrecognized reasons stop with a safe code. |
+| R3. The mock accepts the first POST, then returns HTTP 503/backendError | State becomes `unknown_delivery`. Subsequent runs after both the lease and retry windows produce zero further POSTs. |
+| R4. Fail writes of name, email, phone and message separately | The record survives. There is no success hook or notification. Check PHP logs, stderr and diagnostic buffers for the canaries. Error mode returns to its previous value even on exception. |
+| R5. Owner, another administrator, a regular user and missing configuration | Only the configured owner with `manage_options` can see the page and metabox. Invoke the captured callbacks directly under a different identity as well as testing menu registration. |
+
 ## Changed behavior
 
 `inc-leads.php` reads back every required meta field (including existence of empty
@@ -15,11 +31,16 @@ nonempty strings such as `no` and array values are refused. Meta writes use `wp_
 A false `update_post_meta` return is not itself a failure: unchanged values are valid.
 On incomplete persistence, keep the partial record, record a safe error code, return the
 existing server-error response, and do not call the analytics/notification hook.
-No code in `inc-analytics.php` or `analytics.js` changes.
+The private-field batch temporarily suppresses the core wpdb SQL error output and restores
+the prior mode in `finally`. Only diagnostics captured within this batch are discarded.
+The safe error log contains the enquiry ID. Verification reads the private post, all
+required fields and completion marker with checked SQL snapshots. A submit-side one-off
+read failure can repeat a SELECT without repeating the insertion or saved hook.
 
 The final `_malendo_saved_v1` marker contains a hash of the complete saved field set,
-activation generation, eligibility, QA flag, saved time and whitelisted service. It
-contains no raw client fields. If the PHP request dies after this marker but before
+activation generation, eligibility, QA flag, saved time and whitelisted service. A confirmed missing activation has eligibility false. Unreadable or malformed
+activation gets an explicit review code without any inferred generation. QA and historical
+IDs are excluded. The marker contains no raw client fields. If the PHP request dies after this marker but before
 enqueue, reconciliation creates the missing job. A crash before the marker cannot
 produce a notification. No old unmarked record is inferred to be complete.
 
@@ -29,7 +50,7 @@ previous JSON with `BINARY` equality. A new random revision fences stale workers
 stock unique `option_name` index must exist. There are no new tables or databases.
 
 States: `pending`, `claimed` (pre-send), `sending`, `retry`, `accepted`, `failed`,
-`needs_reauth`, `unknown_delivery`. Each row has attempts, due time, a 180-second lease,
+`needs_reauth`, `needs_review`, `unknown_delivery`. Each row has attempts, due time, a 180-second lease,
 safe status/error code, optional Gmail message ID and up to 20 UTC/Bangkok log entries.
 No headers, credentials, MIME body, names, contact fields or free-form API errors are logged.
 
@@ -66,13 +87,15 @@ webroot, theme code and Git; no symlink file. Fields are `client_id`, `client_se
 `refresh_token`, `sender`. Never put a populated example in Git or a secret in CLI args.
 Production CLI dependencies: PHP 8.3, JSON, cURL, POSIX; PCNTL enables graceful signals.
 
-Five attempts maximum. Explicit Gmail 429/503 rejection and proven DNS/connect failure
-before upload use exponential backoff (60 seconds doubling, 0–30 seconds jitter) and
-respect Retry-After. OAuth failures before sending can also safely retry. Retry-After
-over one day requires review rather than retrying too soon. One 401 permits one token
-refresh/resend; subsequent 401, 403, invalid_grant or invalid scope stop for reauthorization.
-Malformed success, ambiguous network results, 502/504 and crashes in the sending phase
-become unknown delivery. A conservative stop can leave a message unsent; owner review is
+Five attempts maximum. A confirmed 429, a 403 containing only rateLimitExceeded or
+userRateLimitExceeded reasons, or a proven DNS/connect failure before upload uses exponential
+backoff (60 seconds doubling plus 0–30 seconds jitter), respecting Retry-After. Delays over
+one day require review. OAuth failures before sending can safely retry. One 401 allows one
+refresh; repeated 401, known permission reasons, invalid_grant or invalid scope stop for
+reauthorization. Unknown 403 reasons stop for inspection. A 503 from messages.send always
+becomes unknown_delivery, even with a structured backendError body or Retry-After.
+Malformed success, ambiguous network results, other ambiguous 5xx responses and crashes
+in the sending phase also become unknown delivery. A conservative stop can leave a message unsent; owner review is
 safer than a duplicate. No send-only API is used to read the mailbox for reconciliation.
 
 CLI runs at most 10 jobs, stops starting work after 40 seconds, and finishes the in-flight
@@ -82,11 +105,20 @@ flock prevents concurrent CLI invocations; SQL CAS additionally protects the que
 No global WP cron processing. A heartbeat and owner-only Enquiries → Notifications screen
 show stale/failed workers and recent queue state; each enquiry also shows save failure.
 
+For owner diagnostics the web PHP environment must provide `MALENDO_NOTIFICATION_OWNER_ID`
+as the positive decimal ID of the existing owner account, outside Git. The account must
+also have `manage_options`. Missing, malformed or mismatched settings hide the menu and
+metabox and block direct callbacks. No user or capability change is needed. Only the owner
+may inspect `needs_review` and `unknown_delivery` rows. Compare the ID/time with the
+private enquiry; for an uncertain send verify receipt manually with the recipient. The
+worker never reads a mailbox or automatically resends these states. Use Older entries to
+inspect jobs beyond the first 100.
+
 ## Activation and deployment — instructions only, not performed
 
 1. Independent Work acceptance below; separate explicit deployment authorization.
 2. Verify current production/source, ownership, backups and unchanged private enquiries
-   #52/#56 without copying client values into evidence. Keep all new enquiries too.
+   #52/#56/#57 without copying client values into evidence. Keep all new enquiries too.
 3. Deploy reviewed code with transport disabled. Validate WordPress and form in an existing
    isolated clone. Never point the old MyHome deploy workflow at this theme.
 4. Choose/approve a worker OS identity and least-privilege access; no account is created
@@ -97,10 +129,10 @@ show stale/failed workers and recent queue state; each enquiry also shows save f
    Store credentials outside webroot/Git; verify 0600 ownership. No Windows-profile binding.
 6. For activation, configure `MALENDO_WORDPRESS_ROOT`, `MALENDO_NOTIFICATION_LOCK`; obtain
    the current maximum post ID, then explicitly run `worker.php --activate-after-id=N`.
-   A mismatch, ID below 56 or existing activation refuses the operation. This command
+   A mismatch, ID below 57 or existing activation refuses the operation. This command
    writes a single new activation option and never sends mail. It is NOT run in this PR.
    New submissions capture that generation before insertion; in-flight older requests
-   remain excluded. IDs 52/56 and all IDs at or below the boundary are excluded permanently.
+   remain excluded. IDs 52/56/57 and all IDs at or below the boundary are excluded permanently.
 7. Review/copy the service and timer examples only with separate authorization. The
    timer is needed because WP cron is disabled. Do not install it during development.
    Enable transport only after an independently approved test-send and receiving evidence.
@@ -119,8 +151,8 @@ and process recovery, not actual MySQL locking or full WordPress integration. Te
 PHP 8.3 in a temporary directory on the existing Malendo host, in a new network namespace,
 with PHP `open_basedir` restricted to that directory and network/shell functions disabled.
 No production bootstrap, DB socket, external requests, new DB or installed service.
-First-run 40/43 results are preserved; minimal PHP lacked ctype. Retry parsing now uses
-PCRE; the next run passed 48/48 before the additional permission/ambiguous-response tests.
+Revision 1's 56/56 runtime evidence remains in php-run-04.json. Revision 2 replaces the
+old 503 retry expectation, preserves the rest of that coverage, and replays R1–R5.
 See `scripts/malendo-notifications/evidence/QA_RESULT.json` for the final tested hashes/counts.
 
 To reproduce on the existing isolated Linux test environment, copy only the theme and
@@ -128,6 +160,8 @@ notification scripts, create a disposable fixture directory and run:
 
 ```sh
 export MALENDO_TEST_TMP=/absolute/disposable/fixture-directory
+# Optional: point MALENDO_TEST_WPDB_CORE at an isolated copy of core class-wpdb.php
+# to exercise the real print_error implementation without WP bootstrap or a DB connection.
 php -n -d extension=posix scripts/malendo-notifications/tests.php
 node scripts/malendo-notifications/analytics-tests.mjs
 php -n scripts/malendo-notifications/worker.php --run  # env unset: disabled, no WP bootstrap
@@ -138,7 +172,9 @@ The Node VM harness executes unchanged analytics source with mock DOM/events and
 browser/network. PHP exercises actual form and analytics callbacks, save fault injection,
 one receipt claim, consent/QA/admin exclusions, retries, two workers and crash recovery.
 
-Work must independently check in the existing isolated WordPress/MariaDB clone:
+The current restore directories have no independent running WordPress/MariaDB database.
+Native integration remains NOT RUN. Only when an existing isolated clone is available,
+independent Work can check:
 
 - Native meta slashing/readback, each failed field/marker write and intact partial records;
   correct activation boundary, QA and historical records excluded, no false success/receipt.

@@ -2,6 +2,29 @@
 /** Durable, send-only outbox. Loading the theme never performs network requests. */
 if (!defined('ABSPATH')) { exit; }
 
+const MALENDO_LAST_HISTORICAL_LEAD = 57;
+
+class Malendo_Notification_DB_Error extends RuntimeException {}
+class Malendo_Notification_Activation_Invalid extends RuntimeException {}
+
+/** Inspect last_error before any later query can clear it. Never log its SQL or text. */
+function malendo_checked_query($result) {
+    global $wpdb;
+    if ($result === false || $wpdb->last_error !== '') {
+        throw new Malendo_Notification_DB_Error('notification_db_unavailable');
+    }
+    return $result;
+}
+
+/** get_var maps a stored empty string to null; keep corrupt and absent distinct. */
+function malendo_notification_option_raw(string $name): ?string {
+    global $wpdb;
+    $row = malendo_checked_query($wpdb->get_row($wpdb->prepare(
+        "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", $name
+    ), ARRAY_A));
+    return $row === null ? null : $row['option_value'];
+}
+
 interface Malendo_Outbox_Store {
     public function read(int $id): ?array;
     public function insert(int $id, array $job): bool;
@@ -11,8 +34,7 @@ interface Malendo_Outbox_Store {
 final class Malendo_WP_Outbox implements Malendo_Outbox_Store {
     const PREFIX = 'malendo_notify_v1_';
     public function read(int $id): ?array {
-        global $wpdb;
-        $raw = $wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name=%s", self::PREFIX.$id));
+        $raw = malendo_notification_option_raw(self::PREFIX.$id);
         if (!is_string($raw)) { return null; }
         $job = json_decode($raw, true);
         if (!is_array($job) || ($job['id'] ?? null) !== $id) { throw new RuntimeException('outbox_corrupt'); }
@@ -21,14 +43,14 @@ final class Malendo_WP_Outbox implements Malendo_Outbox_Store {
     public function insert(int $id, array $job): bool {
         global $wpdb;
         // option_name has a unique index; no read/check/write race and no autoload.
-        return $wpdb->query($wpdb->prepare("INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')",
-            self::PREFIX.$id, json_encode($job, JSON_THROW_ON_ERROR))) === 1;
+        return malendo_checked_query($wpdb->query($wpdb->prepare("INSERT IGNORE INTO {$wpdb->options} (option_name,option_value,autoload) VALUES (%s,%s,'no')",
+            self::PREFIX.$id, json_encode($job, JSON_THROW_ON_ERROR)))) === 1;
     }
     public function replace(int $id, string $expected, array $job): bool {
         global $wpdb;
         // Binary comparison is essential with case-insensitive WordPress collations.
-        return $wpdb->query($wpdb->prepare("UPDATE {$wpdb->options} SET option_value=%s WHERE option_name=%s AND BINARY option_value=BINARY %s",
-            json_encode($job, JSON_THROW_ON_ERROR), self::PREFIX.$id, $expected)) === 1;
+        return malendo_checked_query($wpdb->query($wpdb->prepare("UPDATE {$wpdb->options} SET option_value=%s WHERE option_name=%s AND BINARY option_value=BINARY %s",
+            json_encode($job, JSON_THROW_ON_ERROR), self::PREFIX.$id, $expected))) === 1;
     }
 }
 
@@ -57,7 +79,7 @@ final class Malendo_Outbox {
         return true;
     }
     public function enqueue(int $id, array $ready): bool {
-        if ($id<=56 || empty($ready['eligible']) || !empty($ready['qa'])) { return false; }
+        if ($id <= MALENDO_LAST_HISTORICAL_LEAD || empty($ready['eligible']) || !empty($ready['qa'])) { return false; }
         $job=array('id'=>$id,'generation'=>$ready['generation'],'saved_at'=>$ready['saved_at'],
             'service'=>$ready['service'],'state'=>'pending','attempts'=>0,'next'=>($this->clock)(),
             'lease'=>0,'message_id'=>null,'log'=>array());
@@ -65,10 +87,14 @@ final class Malendo_Outbox {
         if ($this->store->insert($id,$job)) { return true; }
         return $this->store->read($id)!==null;
     }
-    public function rejectRecoveredMarker(int $id): void {
-        if($id<=56){return;}
-        $job=$this->stamp(array('id'=>$id,'attempts'=>0,'next'=>0,'lease'=>0,'log'=>array()),'failed','saved_record_changed');
-        $this->store->insert($id,$job);
+    public function recordAttention(int $id, string $code): void {
+        if ($id <= MALENDO_LAST_HISTORICAL_LEAD) { return; }
+        $state = $code === 'saved_record_changed' ? 'failed' : 'needs_review';
+        $job = $this->stamp(['id'=>$id, 'attempts'=>0, 'next'=>0, 'lease'=>0, 'log'=>[]], $state, $code);
+        // Insert only: never replace an accepted, sending or unknown job.
+        if (!$this->store->insert($id, $job) && !$this->store->read($id)) {
+            throw new Malendo_Notification_DB_Error('attention_not_persisted');
+        }
     }
     public function tick(int $id, Malendo_Gmail_Transport $transport, callable $eligible): string {
         if (!$transport->enabled()) { return 'disabled'; }
@@ -103,6 +129,17 @@ final class Malendo_Outbox {
             return $this->change($id,$snapshot,$snapshot['job'],'claimed','send_rejected_401');
         };
         try { $result=$transport->deliver($snapshot['job'],$beforeSend,$after401); }
+        catch (Malendo_Notification_DB_Error $error) {
+            // A pre-POST eligibility read failed. Preserve the job and its send budget.
+            if ($snapshot['job']['state'] === 'claimed') {
+                $job = $snapshot['job'];
+                $job['attempts']--;
+                $job['lease'] = 0;
+                $job['next'] = ($this->clock)() + 60;
+                $this->change($id, $snapshot, $job, 'retry', 'db_read_deferred');
+            }
+            throw $error;
+        }
         catch (Throwable $e) { $result=array('state'=>$snapshot['job']['state']==='sending'?'unknown_delivery':'retry','code'=>'transport_exception'); }
         $job=$snapshot['job'];
         if (($result['state'] ?? '')==='lost') { return 'busy'; }
@@ -156,7 +193,7 @@ final class Malendo_Gmail_Transport {
     }
     public static function mime(array $job): string {
         $services=array('Property management','Rental','Buying or selling','Project check','Owner services','Other');
-        if (!is_int($job['id']) || $job['id']<=56 || !in_array($job['service'],$services,true) ||
+        if (!is_int($job['id']) || $job['id'] <= MALENDO_LAST_HISTORICAL_LEAD || !in_array($job['service'],$services,true) ||
             !preg_match('/^[a-f0-9]{32}$/D',$job['generation']) || !is_int($job['saved_at'])) { throw new RuntimeException('message_invalid'); }
         $subject='Malendo — New enquiry #'.$job['id'];
         $body='Enquiry ID: '.$job['id']."\r\nSaved at: ".(new DateTimeImmutable('@'.$job['saved_at']))->setTimezone(new DateTimeZone('Asia/Bangkok'))->format('Y-m-d H:i:s').' Asia/Bangkok'.
@@ -193,13 +230,30 @@ final class Malendo_Gmail_Transport {
             $data=json_decode($r['body']??'',true); $status=(int)$r['status'];
             if ($status===401 && $auth===0) { if (!$after401()) { return $this->result('lost','claim_lost'); } continue; }
             if ($status===401) { return $this->result('needs_reauth','gmail_unauthorized'); }
-            if ($status===403) { return $this->result('needs_reauth','gmail_permission_denied'); }
+            if ($status === 403) {
+                $reasons = $data['error']['errors'] ?? null;
+                $onlyRateLimits = is_array($reasons) && count($reasons) > 0;
+                foreach (is_array($reasons) ? $reasons : [] as $item) {
+                    $reason = $item['reason'] ?? null;
+                    if (in_array($reason, ['domainPolicy', 'forbidden', 'insufficientPermissions'], true)) {
+                        return $this->result('needs_reauth', 'gmail_permission_denied');
+                    }
+                    if (!in_array($reason, ['rateLimitExceeded', 'userRateLimitExceeded'], true)) {
+                        $onlyRateLimits = false;
+                    }
+                }
+                return $onlyRateLimits ? $this->retryResult($r, 'gmail_rate_limited')
+                    : $this->result('failed', 'gmail_403_requires_review');
+            }
+            if ($status === 503) {
+                return $this->result('unknown_delivery', 'gmail_503_outcome_unknown');
+            }
             if ($status===200 && is_string($data['id']??null) && preg_match('/^[a-zA-Z0-9_-]{1,128}$/D',$data['id'])) {
                 return array('state'=>'accepted','code'=>'gmail_accepted','message_id'=>$data['id']);
             }
             // Retry only explicit rejection or a proven connection failure before upload.
             if (($status===0 && ($r['before_send']??false)) ||
-                (in_array($status,array(429,503),true) && ($data['error']['code']??null)===$status)) {
+                ($status===429 && ($data['error']['code']??null)===$status)) {
                 return $this->retryResult($r,$status===0?'connect_failed':'gmail_rejected_transient');
             }
             if ($status>=400 && $status<500) { return $this->result('failed','gmail_rejected_permanent'); }
@@ -224,50 +278,132 @@ final class Malendo_Gmail_Transport {
 }
 
 function malendo_notification_activation(): ?array {
-    $a=get_option('malendo_notify_activation_v1',null);
-    return is_array($a) && is_int($a['after_id']??null) && $a['after_id']>=56 &&
-        preg_match('/^[a-f0-9]{32}$/D',(string)($a['generation']??'')) ? $a : null;
+    // get_option can negative-cache a failed read. Read the immutable fence directly.
+    $raw = malendo_notification_option_raw('malendo_notify_activation_v1');
+    if ($raw === null) { return null; }
+    $a = @unserialize($raw, ['allowed_classes'=>false]);
+    if (!is_array($a) || !is_int($a['after_id'] ?? null) || $a['after_id'] < MALENDO_LAST_HISTORICAL_LEAD
+        || !is_string($a['generation'] ?? null) || !preg_match('/^[a-f0-9]{32}$/D', $a['generation'])) {
+        throw new Malendo_Notification_Activation_Invalid('activation_invalid');
+    }
+    return $a;
 }
+
 function malendo_lead_fields(): array { return array('name','email','phone','service','message','landing','locale','consented_at'); }
 function malendo_lead_fields_hash(array $fields): string { ksort($fields); return hash('sha256',json_encode($fields,JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR)); }
-function malendo_lead_saved_marker(int $id,array $expected,?array $activation,bool $qa): bool {
-    wp_cache_delete($id,'post_meta');
-    foreach(malendo_lead_fields() as $field) {
-        if (!array_key_exists($field,$expected) || !metadata_exists('post',$id,'_malendo_'.$field) || (string)get_post_meta($id,'_malendo_'.$field,true)!==$expected[$field]) { return false; }
+
+/** One database snapshot. Null means missing/wrong post; false means duplicate/damaged metadata. */
+function malendo_lead_snapshot(int $id): array|false|null {
+    global $wpdb;
+    $keys = array_map(static fn($f) => '_malendo_' . $f, [...malendo_lead_fields(), 'saved_v1']);
+    $placeholders = implode(',', array_fill(0, count($keys), '%s'));
+    $rows = malendo_checked_query($wpdb->get_results($wpdb->prepare(
+        "SELECT p.post_type,p.post_status,m.meta_key,m.meta_value FROM {$wpdb->posts} p
+         LEFT JOIN {$wpdb->postmeta} m ON m.post_id=p.ID AND m.meta_key IN ($placeholders)
+         WHERE p.ID=%d", ...[...$keys, $id]
+    ), ARRAY_A));
+    if (!$rows || $rows[0]['post_type'] !== 'malendo_lead' || $rows[0]['post_status'] !== 'private') {
+        return null;
     }
-    if (get_post_type($id)!=='malendo_lead' || get_post_status($id)!=='private') { return false; }
-    $marker=array('hash'=>malendo_lead_fields_hash($expected),'eligible'=>$activation!==null && $id>$activation['after_id'] && $id>56 && !$qa,
-        'generation'=>$activation['generation']??'', 'qa'=>$qa,'saved_at'=>time(),'service'=>$expected['service']);
-    $raw=json_encode($marker,JSON_THROW_ON_ERROR);
-    update_post_meta($id,'_malendo_saved_v1',$raw);
-    wp_cache_delete($id,'post_meta');
-    return get_post_meta($id,'_malendo_saved_v1',true)===$raw;
+    $fields = [];
+    foreach ($rows as $row) {
+        if ($row['meta_key'] === null) { continue; }
+        $field = substr($row['meta_key'], strlen('_malendo_'));
+        $value = $row['meta_value'];
+        // WP double-serializes literal serialized strings stored by update_post_meta.
+        if (is_serialized($value)) { $value = @unserialize($value, ['allowed_classes'=>false]); }
+        if (!is_string($value) || array_key_exists($field, $fields)) { return false; }
+        $fields[$field] = $value;
+    }
+    return $fields;
 }
+
+/** In the submit request, retry only a SELECT. Never repeat an insert or the saved hook. */
+function malendo_form_snapshot(int $id): array|false|null {
+    try { return malendo_lead_snapshot($id); }
+    catch (Malendo_Notification_DB_Error $e) { return malendo_lead_snapshot($id); }
+}
+
+function malendo_lead_saved_marker(int $id, array $expected, ?array $activation, bool $qa, ?string $review=null): bool {
+    $snapshot = malendo_form_snapshot($id);
+    if (!is_array($snapshot)) { return false; }
+    unset($snapshot['saved_v1']);
+    if (count($snapshot) !== count(malendo_lead_fields()) || count($expected) !== count($snapshot)) { return false; }
+    foreach ($expected as $key=>$value) {
+        if (($snapshot[$key] ?? null) !== $value) { return false; }
+    }
+    $candidate = $id > MALENDO_LAST_HISTORICAL_LEAD && !$qa;
+    $marker = [
+        'hash'=>malendo_lead_fields_hash($expected),
+        'eligible'=>$candidate && $activation !== null && $id > $activation['after_id'],
+        'generation'=>$activation['generation'] ?? '', 'qa'=>$qa, 'saved_at'=>time(), 'service'=>$expected['service']
+    ];
+    if ($review !== null && $candidate) {
+        $marker['eligible'] = null;
+        $marker['review'] = $review; // Never infer the generation of an in-flight submission later.
+    }
+    $raw = json_encode($marker, JSON_THROW_ON_ERROR);
+    update_post_meta($id, '_malendo_saved_v1', wp_slash($raw));
+    global $wpdb;
+    if ($wpdb->last_error !== '') { throw new Malendo_Notification_DB_Error('marker_write_failed'); }
+    return (malendo_form_snapshot($id)['saved_v1'] ?? null) === $raw;
+}
+
+/** Confirmed absence, damaged data and read failures have separate outcomes. */
+function malendo_notification_decision(int $id): array {
+    if ($id <= MALENDO_LAST_HISTORICAL_LEAD) { return ['state'=>'excluded']; }
+    $fields = malendo_lead_snapshot($id);
+    if ($fields === null || (is_array($fields) && !isset($fields['saved_v1']))) { return ['state'=>'excluded']; }
+    $damaged = ['state'=>'attention', 'code'=>'saved_record_changed'];
+    if ($fields === false) { return $damaged; }
+    $marker = json_decode($fields['saved_v1'], true);
+    unset($fields['saved_v1']);
+    if (!is_array($marker) || !is_bool($marker['qa'] ?? null)) { return $damaged; }
+    if ($marker['qa'] || ($marker['eligible'] ?? null) === false) { return ['state'=>'excluded']; }
+    if (in_array($marker['review'] ?? null, ['activation_read_unknown','activation_invalid'], true)) {
+        return ['state'=>'attention', 'code'=>$marker['review']];
+    }
+    if (($marker['eligible'] ?? null) !== true || !is_string($marker['hash'] ?? null)
+        || !is_int($marker['saved_at'] ?? null) || count($fields) !== count(malendo_lead_fields())
+        || !hash_equals($marker['hash'], malendo_lead_fields_hash($fields))
+        || ($marker['service'] ?? null) !== $fields['service']) { return $damaged; }
+    try { $activation = malendo_notification_activation(); }
+    catch (Malendo_Notification_Activation_Invalid $e) { return ['state'=>'attention','code'=>'activation_invalid']; }
+    if (!$activation || ($marker['generation'] ?? null) !== $activation['generation'] || $id <= $activation['after_id']) {
+        return ['state'=>'attention','code'=>'generation_unproven'];
+    }
+    return ['state'=>'ready', 'marker'=>$marker];
+}
+
 function malendo_notification_ready(int $id): ?array {
-    if ($id<=56 || get_post_type($id)!=='malendo_lead' || get_post_status($id)!=='private') { return null; }
-    wp_cache_delete($id,'post_meta');
-    $m=json_decode((string)get_post_meta($id,'_malendo_saved_v1',true),true); $a=malendo_notification_activation();
-    if (!$a || !$m || empty($m['eligible']) || !empty($m['qa']) || $m['generation']!==$a['generation'] || $id<=$a['after_id']) { return null; }
-    $fields=array(); foreach(malendo_lead_fields() as $f){if(!metadata_exists('post',$id,'_malendo_'.$f)){return null;}$fields[$f]=(string)get_post_meta($id,'_malendo_'.$f,true);}
-    return hash_equals($m['hash'],malendo_lead_fields_hash($fields)) ? $m : null;
+    return malendo_notification_decision($id)['marker'] ?? null;
+}
+
+function malendo_recover_notification(int $id): void {
+    $decision = malendo_notification_decision($id);
+    $queue = new Malendo_Outbox(new Malendo_WP_Outbox());
+    if ($decision['state'] === 'ready' && !$queue->enqueue($id, $decision['marker'])) {
+        throw new Malendo_Notification_DB_Error('notification_not_persisted');
+    }
+    if ($decision['state'] === 'attention') { $queue->recordAttention($id, $decision['code']); }
 }
 function malendo_queue_saved_lead(int $id): void {
-    try {
-        $ready=malendo_notification_ready($id);
-        if ($ready) { (new Malendo_Outbox(new Malendo_WP_Outbox()))->enqueue($id,$ready); }
-    } catch(Throwable $e) { error_log('Malendo notification queue deferred; enquiry ID '.(int)$id); }
+    try { malendo_recover_notification($id); }
+    catch (Throwable $e) { error_log('Malendo notification queue deferred; enquiry ID '.(int)$id); }
 }
 add_action('malendo_enquiry_saved','malendo_queue_saved_lead',20);
 
 function malendo_notifications_reconcile(int $limit=50): void {
     global $wpdb;
-    // Only explicit new-code completion markers, never unmarked historical enquiries.
-    $ids=$wpdb->get_col($wpdb->prepare("SELECT DISTINCT m.post_id FROM {$wpdb->postmeta} m LEFT JOIN {$wpdb->options} o ON o.option_name=CONCAT(%s,m.post_id) WHERE m.meta_key='_malendo_saved_v1' AND m.meta_value LIKE %s AND o.option_id IS NULL ORDER BY m.post_id LIMIT %d",
-        Malendo_WP_Outbox::PREFIX,'%"eligible":true%',max(1,min(50,$limit))));
-    foreach($ids as $id){
-        if(malendo_notification_ready((int)$id)){malendo_queue_saved_lead((int)$id);}
-        else{(new Malendo_Outbox(new Malendo_WP_Outbox()))->rejectRecoveredMarker((int)$id);}
-    }
+    $ids = malendo_checked_query($wpdb->get_col($wpdb->prepare(
+        "SELECT DISTINCT m.post_id FROM {$wpdb->postmeta} m JOIN {$wpdb->posts} p
+         ON p.ID=m.post_id AND p.post_type='malendo_lead' AND p.post_status='private' LEFT JOIN {$wpdb->options} o
+         ON o.option_name=CONCAT(%s,m.post_id) WHERE m.post_id>%d AND m.meta_key='_malendo_saved_v1'
+         AND (m.meta_value LIKE %s OR m.meta_value LIKE %s) AND o.option_id IS NULL
+         ORDER BY m.post_id LIMIT %d", Malendo_WP_Outbox::PREFIX, MALENDO_LAST_HISTORICAL_LEAD,
+         '%"eligible":true%', '%"review":%', max(1,min(50,$limit))
+    )));
+    foreach ($ids as $id) { malendo_recover_notification((int)$id); }
 }
 function malendo_notifications_worker(Malendo_Gmail_Transport $transport,int $limit=10): array {
     if (!$transport->enabled()) { return array('status'=>'disabled','processed'=>0); }
@@ -276,7 +412,7 @@ function malendo_notifications_worker(Malendo_Gmail_Transport $transport,int $li
     // Query the top-level state, never historical log states. Future retries cannot starve due rows.
     $keys=$wpdb->get_col($wpdb->prepare("SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s AND ((JSON_UNQUOTE(JSON_EXTRACT(option_value,'$.state')) IN ('pending','retry') AND CAST(JSON_UNQUOTE(JSON_EXTRACT(option_value,'$.next')) AS UNSIGNED)<=%d) OR (JSON_UNQUOTE(JSON_EXTRACT(option_value,'$.state')) IN ('claimed','sending') AND CAST(JSON_UNQUOTE(JSON_EXTRACT(option_value,'$.lease')) AS UNSIGNED)<=%d)) ORDER BY option_id LIMIT %d",
         $wpdb->esc_like(Malendo_WP_Outbox::PREFIX).'%', time(),time(),max(1,min(10,$limit))));
-    if($wpdb->last_error){throw new RuntimeException('outbox_query_failed');}
+    malendo_checked_query($keys);
     $out=array(); $engine=new Malendo_Outbox(new Malendo_WP_Outbox()); $deadline=microtime(true)+40;
     foreach($keys as $key) {
         if(count($out)>=max(1,min(10,$limit)) || microtime(true)>$deadline){break;}
@@ -285,24 +421,41 @@ function malendo_notifications_worker(Malendo_Gmail_Transport $transport,int $li
     }
     return array('status'=>'complete','results'=>$out);
 }
+function malendo_notification_owner(): bool {
+    $configured = getenv('MALENDO_NOTIFICATION_OWNER_ID');
+    return is_string($configured) && preg_match('/^[1-9][0-9]*$/D', $configured)
+        && (string)get_current_user_id() === $configured && current_user_can('manage_options');
+}
+
 add_action('admin_menu',static function(): void {
+    if (!malendo_notification_owner()) { return; }
     add_submenu_page('edit.php?post_type=malendo_lead','Notification status','Notifications','manage_options','malendo-notifications',static function(): void {
-        if(!current_user_can('manage_options')){return;}
+        if (!malendo_notification_owner()) { return; }
         global $wpdb;
         echo '<div class="wrap"><h1>Malendo notifications</h1><p>API accepted is not confirmed inbox delivery. Unknown delivery requires manual reconciliation; never replay automatically.</p>';
-        echo '<p>Queue activation: '.(malendo_notification_activation()?'configured':'off').'. Transport is CLI-only and disabled unless explicitly enabled. Verify the external timer separately.</p>';
+        try { $activation = malendo_notification_activation() ? 'configured' : 'off'; }
+        catch (RuntimeException $e) { $activation = 'unverified; owner review required'; }
+        echo '<p>Queue activation: '.$activation.'. Transport is CLI-only and disabled unless explicitly enabled. Verify the external timer separately.</p>';
         $heartbeat=get_option('malendo_notify_worker_v1',array());
         $recent=is_array($heartbeat) && ($heartbeat['time']??0)>=time()-300 && ($heartbeat['status']??'')==='complete';
         echo '<p><strong>'.($recent?'Worker heartbeat is recent.':'Worker heartbeat missing, stale or failed. Notifications may be stopped.').'</strong></p>';
-        $rows=$wpdb->get_col($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name LIKE %s ORDER BY option_id DESC LIMIT 100",$wpdb->esc_like(Malendo_WP_Outbox::PREFIX).'%'));
+        $page = max(1, min(1000000, (int)($_GET['notify_page'] ?? 1)));
+        $rows = $wpdb->get_col($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name LIKE %s
+            ORDER BY option_id DESC LIMIT 101 OFFSET %d", $wpdb->esc_like(Malendo_WP_Outbox::PREFIX).'%', ($page-1)*100));
+        if ($wpdb->last_error !== '') { echo '<p>Queue read failed. Check again.</p></div>'; return; }
+        $more = count($rows) > 100;
+        $rows = array_slice($rows, 0, 100);
         echo '<table><tr><th>ID</th><th>Status</th><th>Attempts</th><th>Code</th><th>Updated UTC</th></tr>';
         foreach($rows as $raw){$j=json_decode($raw,true);if(!is_array($j)){continue;}echo '<tr>';foreach(array($j['id'],$j['state'],$j['attempts'],$j['code'],gmdate('c',$j['updated'])) as $v){echo '<td>'.esc_html((string)$v).'</td>';}echo '</tr>';}
-        echo '</table><p>Up to 100 recent queue entries. Save failures remain on their enquiry record.</p></div>';
+        echo '</table><p>Needs review and unknown delivery require manual reconciliation. Save failures are also shown on their enquiry record.</p>';
+        if ($more) { echo '<a href="'.esc_url(add_query_arg('notify_page',$page+1)).'">Older entries</a>'; }
+        echo '</div>';
     });
 });
 add_action('add_meta_boxes_malendo_lead',static function(): void {
+    if (!malendo_notification_owner()) { return; }
     add_meta_box('malendo_save_status','Save / notification status',static function($post): void {
-        if(!current_user_can('manage_options')){return;}
+        if (!malendo_notification_owner()) { return; }
         $error=get_post_meta($post->ID,'_malendo_save_error',true);
         $marker=get_post_meta($post->ID,'_malendo_saved_v1',true);
         echo '<p>'.esc_html($error ? 'Incomplete save: '.$error : ($marker ? 'Completion marker recorded.' : 'Completion unverified: legacy or interrupted record; owner review required.')).'</p>';
